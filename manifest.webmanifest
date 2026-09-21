@@ -2,20 +2,20 @@
   "name": "Ilya Communications Hub",
   "short_name": "Communications",
   "description": "Private personal and GDH communications workspace",
-  "start_url": "/?source=installed",
-  "scope": "/",
+  "start_url": "/ilya-communications-hub-app/?source=installed",
+  "scope": "/ilya-communications-hub-app/",
   "display": "standalone",
   "orientation": "any",
   "background_color": "#f3f6f8",
   "theme_color": "#102d2a",
   "categories": ["business", "productivity", "communication"],
   "icons": [
-    { "src": "/hub-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" },
-    { "src": "/hub-icon-180.png", "sizes": "180x180", "type": "image/png" },
-    { "src": "/hub-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+    { "src": "/ilya-communications-hub-app/hub-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" },
+    { "src": "/ilya-communications-hub-app/hub-icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "/ilya-communications-hub-app/hub-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
   ],
   "shortcuts": [
-    { "name": "Needs My Attention", "short_name": "Attention", "url": "/?view=attention", "icons": [{ "src": "/hub-icon.svg", "sizes": "any" }] },
-    { "name": "Contacts", "short_name": "Contacts", "url": "/?view=contacts", "icons": [{ "src": "/hub-icon.svg", "sizes": "any" }] }
+    { "name": "Needs My Attention", "short_name": "Attention", "url": "/ilya-communications-hub-app/?view=attention", "icons": [{ "src": "/ilya-communications-hub-app/hub-icon.svg", "sizes": "any" }] },
+    { "name": "Contacts", "short_name": "Contacts", "url": "/ilya-communications-hub-app/?view=contacts", "icons": [{ "src": "/ilya-communications-hub-app/hub-icon.svg", "sizes": "any" }] }
   ]
 }

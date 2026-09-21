@@ -1,5 +1,6 @@
 const CACHE = 'communications-hub-v1';
-const SHELL = ['/', '/manifest.webmanifest', '/hub-icon.svg', '/hub-icon-180.png', '/hub-icon-512.png'];
+const BASE = '/ilya-communications-hub-app';
+const SHELL = [`${BASE}/`, `${BASE}/manifest.webmanifest`, `${BASE}/hub-icon.svg`, `${BASE}/hub-icon-180.png`, `${BASE}/hub-icon-512.png`];
 
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)));
@@ -24,8 +25,8 @@ self.addEventListener('push', event => {
   const data = event.data ? event.data.json() : {};
   event.waitUntil(self.registration.showNotification(data.title || 'Needs My Attention', {
     body: data.body || 'A communication needs your attention.',
-    icon: '/hub-icon-180.png',
-    badge: '/hub-icon-180.png',
+    icon: `${BASE}/hub-icon-180.png`,
+    badge: `${BASE}/hub-icon-180.png`,
     data: { url: data.url || '/?view=attention' }
   }));
 });
