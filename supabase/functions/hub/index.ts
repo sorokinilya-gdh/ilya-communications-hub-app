@@ -99,7 +99,7 @@ async function gmailAccessToken() {
 async function syncGmail() {
   const db = admin(); const { accessToken, mailbox } = await gmailAccessToken();
   const { data: sync } = await db.from('communication_sync_state').select('*').eq('provider', 'gmail').maybeSingle();
-  const params = new URLSearchParams({ maxResults: '100' });
+  const params = new URLSearchParams({ maxResults: '250' });
   if (sync?.history_cursor) params.set('pageToken', sync.history_cursor);
   else if (sync?.initial_import_complete && sync.last_message_at) params.set('q', `after:${Math.floor(new Date(sync.last_message_at).getTime() / 1000)}`);
   const authorization = { Authorization: `Bearer ${accessToken}` };
@@ -109,8 +109,8 @@ async function syncGmail() {
   const items: any[] = page.messages ?? [];
   const detailParams = new URLSearchParams({ format: 'metadata' });
   for (const name of ['From', 'To', 'Subject', 'Date']) detailParams.append('metadataHeaders', name);
-  for (let start = 0; start < items.length; start += 10) {
-    const batch = await Promise.all(items.slice(start, start + 10).map(async item => {
+  for (let start = 0; start < items.length; start += 20) {
+    const batch = await Promise.all(items.slice(start, start + 20).map(async item => {
       const result = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(item.id)}?${detailParams}`, { headers: authorization });
       if (!result.ok) throw new Error(`Gmail message ${item.id} failed (HTTP ${result.status}); page will be retried.`);
       return result.json();
@@ -127,12 +127,13 @@ async function syncGmail() {
     const { error } = await db.from('communication_messages').upsert(rows, { onConflict: 'id' });
     if (error) throw new Error(`Gmail message storage failed: ${error.message}`);
   }
-  const newest = rows.map(row => row.received_at).sort().at(-1) ?? sync?.last_message_at ?? null;
+  const { data: latestStored } = await db.from('communication_messages').select('received_at').eq('provider', 'gmail').order('received_at', { ascending: false }).limit(1).maybeSingle();
+  const newest = latestStored?.received_at ?? sync?.last_message_at ?? null;
   const { error: stateError } = await db.from('communication_sync_state').upsert({ provider: 'gmail', history_cursor: page.nextPageToken ?? null,
     initial_import_complete: !page.nextPageToken, last_message_at: newest, last_sync_at: new Date().toISOString(), last_error: null,
     imported_count: Number(sync?.imported_count ?? 0) + rows.length, updated_at: new Date().toISOString() });
   if (stateError) throw new Error(`Gmail sync state storage failed: ${stateError.message}`);
-  return { imported: rows.length, hasMore: Boolean(page.nextPageToken) };
+  return { imported: rows.length, hasMore: Boolean(page.nextPageToken), estimatedTotal: page.resultSizeEstimate ?? null };
 }
 
 function records(value: any): any[] {
@@ -190,7 +191,7 @@ async function syncZoho() {
   let cursors: Record<string, number> = {};
   try {
     const saved = JSON.parse(sync?.history_cursor || '{}');
-    if (saved && typeof saved === 'object' && !Array.isArray(saved)) cursors = saved;
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) cursors = saved.cursors && typeof saved.cursors === 'object' ? saved.cursors : saved;
   } catch {
     // Previous versions stored one shared numeric cursor; restart each mailbox safely.
   }
@@ -199,7 +200,8 @@ async function syncZoho() {
     const accountId = field(account, 'accountId', 'accountID');
     if (!accountId) continue;
     const mailbox = field(account, 'primaryEmailAddress', 'mailboxAddress', 'mailId') || 'Zoho';
-    const start = Math.max(Number(cursors[accountId] || 1), 1);
+    const savedCursor = Number(cursors[accountId] ?? 1);
+    const start = savedCursor < 0 ? 1 : Math.max(savedCursor, 1);
     const result = await fetch(`https://mail.zoho.com/api/accounts/${encodeURIComponent(accountId)}/messages/view?start=${start}&limit=200&sortBy=date&sortorder=false&includeto=true`, { headers });
     if (!result.ok) {
       failures.push(`${mailbox}: HTTP ${result.status}`);
@@ -213,8 +215,8 @@ async function syncZoho() {
       continue;
     }
     const page = records(payload);
-    cursors[accountId] = page.length === 200 ? start + 200 : 1;
-    mailboxResults.push({ mailbox, imported: page.length, hasMore: page.length === 200 });
+    cursors[accountId] = savedCursor < 0 ? -1 : page.length === 200 ? start + 200 : -1;
+    mailboxResults.push({ mailbox, imported: page.length, hasMore: cursors[accountId] > 1 });
     for (const message of page) {
       const providerId = field(message, 'messageId', 'messageID'); if (!providerId) continue;
       const rawTime = field(message, 'receivedTime', 'sentDateInGMT', 'receivedDate');
@@ -235,10 +237,13 @@ async function syncZoho() {
   const hasMore = Object.values(cursors).some(cursor => cursor > 1);
   const warnings = [...discoveryErrors, ...failures];
   const lastError = warnings.length ? `Zoho access: ${warnings.join('; ')}` : null;
-  const { error: stateError } = await db.from('communication_sync_state').upsert({ provider: 'zoho', history_cursor: JSON.stringify(cursors), initial_import_complete: !hasMore,
+  const { error: stateError } = await db.from('communication_sync_state').upsert({ provider: 'zoho', history_cursor: JSON.stringify({ cursors, organizationMailboxes: [...accounts.values()].map(account => field(account, 'primaryEmailAddress', 'mailboxAddress', 'mailId')).filter(Boolean), authorizedMailboxes: ownAccounts.map(account => field(account, 'primaryEmailAddress', 'mailboxAddress', 'mailId')).filter(Boolean) }), initial_import_complete: !hasMore,
     last_message_at: newest, last_sync_at: new Date().toISOString(), last_error: lastError, imported_count: Number(sync?.imported_count ?? 0) + rows.length, updated_at: new Date().toISOString() });
   if (stateError) throw new Error(`Zoho sync state storage failed: ${stateError.message}`);
-  return { imported: rows.length, hasMore, mailboxCount: accounts.size, accessibleMailboxCount: mailboxResults.filter(row => !row.error).length, warnings, mailboxes: mailboxResults };
+  const accessibleMailboxCount = ownAccounts.length;
+  const { error: integrationError } = await db.from('communication_integrations').update({ account_count: accessibleMailboxCount }).eq('provider', 'zoho');
+  if (integrationError) throw new Error(`Zoho mailbox count storage failed: ${integrationError.message}`);
+  return { imported: rows.length, hasMore, mailboxCount: accounts.size, accessibleMailboxCount, warnings, mailboxes: mailboxResults };
 }
 
 async function listMessages(url: URL) {
@@ -248,7 +253,9 @@ async function listMessages(url: URL) {
   const provider = url.searchParams.get('provider'); const mailbox = url.searchParams.get('mailbox');
   if (provider) query = query.eq('provider', provider); if (mailbox) query = query.eq('mailbox_owner', mailbox);
   const { data, error, count } = await query; if (error) throw error;
-  const { data: mailboxRows } = await admin().from('communication_messages').select('mailbox_owner');
+  let mailboxQuery = admin().from('communication_messages').select('mailbox_owner');
+  if (provider) mailboxQuery = mailboxQuery.eq('provider', provider);
+  const { data: mailboxRows } = await mailboxQuery;
   const counts = new Map<string, number>(); for (const row of mailboxRows ?? []) counts.set(row.mailbox_owner, (counts.get(row.mailbox_owner) ?? 0) + 1);
   return { messages: (data ?? []).map(uiMessage), total: count ?? 0, mailboxes: [...counts].map(([email, count]) => ({ email, count })) };
 }
@@ -257,7 +264,9 @@ async function status(provider: string) {
   const configured = provider === 'gmail' ? Boolean(Deno.env.get('GMAIL_CLIENT_ID') && Deno.env.get('GMAIL_CLIENT_SECRET')) : Boolean(Deno.env.get('ZOHO_CLIENT_ID') && Deno.env.get('ZOHO_CLIENT_SECRET'));
   const { data } = await admin().from('communication_integrations').select('account_count,connected_at,organization_name').eq('provider', provider).maybeSingle();
   const { data: sync } = await admin().from('communication_sync_state').select('*').eq('provider', provider).maybeSingle();
-  return { configured, connected: Boolean(data), accountCount: data?.account_count ?? 0, connectedAt: data?.connected_at ?? null, email: data?.organization_name ?? null, sync };
+  let mailboxInfo: any = {};
+  if (provider === 'zoho') { try { const saved = JSON.parse(sync?.history_cursor || '{}'); mailboxInfo = { organizationMailboxes: saved.organizationMailboxes || [], authorizedMailboxes: saved.authorizedMailboxes || [] }; } catch { /* old cursor format */ } }
+  return { configured, connected: Boolean(data), accountCount: data?.account_count ?? 0, connectedAt: data?.connected_at ?? null, email: data?.organization_name ?? null, sync, ...mailboxInfo };
 }
 
 Deno.serve(async request => {
