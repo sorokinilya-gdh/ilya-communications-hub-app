@@ -165,11 +165,31 @@ async function syncZoho() {
   const ownAccounts = records(await accountResult.json());
   if (!ownAccounts.length) throw new Error('Zoho returned no accessible mailboxes. Reconnect the Zoho account with mailbox access.');
   const accounts = new Map<string, any>();
+  const accessById = new Map<string, Record<string, string>>();
+  const authorizedEmails = new Set<string>();
+  const discoveryErrors: string[] = [];
   for (const account of ownAccounts) {
     const id = field(account, 'accountId', 'accountID');
-    if (id) accounts.set(id, account);
+    if (id) { accounts.set(id, account); accessById.set(id, headers); authorizedEmails.add(field(account, 'primaryEmailAddress', 'mailboxAddress', 'mailId')); }
   }
-  const discoveryErrors: string[] = [];
+  const { data: additional, error: credentialsError } = await db.from('communication_integrations').select('*').like('provider', 'zoho:%');
+  if (credentialsError) throw credentialsError;
+  for (const credential of additional ?? []) {
+    try {
+      const refreshed = await fetch('https://accounts.zoho.com/oauth/v2/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'refresh_token', client_id: env('ZOHO_CLIENT_ID'), client_secret: env('ZOHO_CLIENT_SECRET'), refresh_token: decryptToken(credential) }) });
+      const token = await refreshed.json();
+      if (!refreshed.ok || !token.access_token) throw new Error(token.error || 'token refresh failed');
+      const mailboxHeaders = { Authorization: 'Zoho-oauthtoken ' + token.access_token };
+      const listed = await fetch('https://mail.zoho.com/api/accounts', { headers: mailboxHeaders });
+      if (!listed.ok) throw new Error('account list HTTP ' + listed.status);
+      for (const account of records(await listed.json())) {
+        const id = field(account, 'accountId', 'accountID');
+        if (!id) continue;
+        accounts.set(id, account); accessById.set(id, mailboxHeaders);
+        authorizedEmails.add(field(account, 'primaryEmailAddress', 'mailboxAddress', 'mailId'));
+      }
+    } catch (error) { discoveryErrors.push((credential.organization_name || credential.provider) + ': ' + (error instanceof Error ? error.message : 'connection failed')); }
+  }
   const organizationIds = [...new Set(ownAccounts.map(account => field(account.policyId, 'zoid')).filter(Boolean))];
   if (!organizationIds.length) discoveryErrors.push('Zoho did not return an organization ID for mailbox discovery');
   for (const zoid of organizationIds) {
@@ -189,9 +209,13 @@ async function syncZoho() {
   }
   const { data: sync } = await db.from('communication_sync_state').select('*').eq('provider', 'zoho').maybeSingle();
   let cursors: Record<string, number> = {};
+  let previouslyAuthorized = new Set<string>();
   try {
     const saved = JSON.parse(sync?.history_cursor || '{}');
-    if (saved && typeof saved === 'object' && !Array.isArray(saved)) cursors = saved.cursors && typeof saved.cursors === 'object' ? saved.cursors : saved;
+    if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+      cursors = saved.cursors && typeof saved.cursors === 'object' ? saved.cursors : saved;
+      previouslyAuthorized = new Set(saved.authorizedMailboxes || []);
+    }
   } catch {
     // Previous versions stored one shared numeric cursor; restart each mailbox safely.
   }
@@ -200,9 +224,11 @@ async function syncZoho() {
     const accountId = field(account, 'accountId', 'accountID');
     if (!accountId) continue;
     const mailbox = field(account, 'primaryEmailAddress', 'mailboxAddress', 'mailId') || 'Zoho';
-    const savedCursor = Number(cursors[accountId] ?? 1);
+    const savedCursor = previouslyAuthorized.has(mailbox) ? Number(cursors[accountId] ?? 1) : 1;
     const start = savedCursor < 0 ? 1 : Math.max(savedCursor, 1);
-    const result = await fetch(`https://mail.zoho.com/api/accounts/${encodeURIComponent(accountId)}/messages/view?start=${start}&limit=200&sortBy=date&sortorder=false&includeto=true`, { headers });
+    const mailboxHeaders = accessById.get(accountId);
+    if (!mailboxHeaders) { mailboxResults.push({ mailbox, imported: 0, authorizationRequired: true }); continue; }
+    const result = await fetch(`https://mail.zoho.com/api/accounts/${encodeURIComponent(accountId)}/messages/view?start=${start}&limit=200&sortBy=date&sortorder=false&includeto=true`, { headers: mailboxHeaders });
     if (!result.ok) {
       failures.push(`${mailbox}: HTTP ${result.status}`);
       mailboxResults.push({ mailbox, imported: 0, error: `HTTP ${result.status}` });
@@ -237,10 +263,10 @@ async function syncZoho() {
   const hasMore = Object.values(cursors).some(cursor => cursor > 1);
   const warnings = [...discoveryErrors, ...failures];
   const lastError = warnings.length ? `Zoho access: ${warnings.join('; ')}` : null;
-  const { error: stateError } = await db.from('communication_sync_state').upsert({ provider: 'zoho', history_cursor: JSON.stringify({ cursors, organizationMailboxes: [...accounts.values()].map(account => field(account, 'primaryEmailAddress', 'mailboxAddress', 'mailId')).filter(Boolean), authorizedMailboxes: ownAccounts.map(account => field(account, 'primaryEmailAddress', 'mailboxAddress', 'mailId')).filter(Boolean) }), initial_import_complete: !hasMore,
+  const { error: stateError } = await db.from('communication_sync_state').upsert({ provider: 'zoho', history_cursor: JSON.stringify({ cursors, organizationMailboxes: [...accounts.values()].map(account => field(account, 'primaryEmailAddress', 'mailboxAddress', 'mailId')).filter(Boolean), authorizedMailboxes: [...authorizedEmails].filter(Boolean) }), initial_import_complete: !hasMore,
     last_message_at: newest, last_sync_at: new Date().toISOString(), last_error: lastError, imported_count: Number(sync?.imported_count ?? 0) + rows.length, updated_at: new Date().toISOString() });
   if (stateError) throw new Error(`Zoho sync state storage failed: ${stateError.message}`);
-  const accessibleMailboxCount = ownAccounts.length;
+  const accessibleMailboxCount = accessById.size;
   const { error: integrationError } = await db.from('communication_integrations').update({ account_count: accessibleMailboxCount }).eq('provider', 'zoho');
   if (integrationError) throw new Error(`Zoho mailbox count storage failed: ${integrationError.message}`);
   return { imported: rows.length, hasMore, mailboxCount: accounts.size, accessibleMailboxCount, warnings, mailboxes: mailboxResults };
@@ -286,7 +312,7 @@ Deno.serve(async request => {
     if (action === 'status') return response(200, await status(provider));
     if (action === 'auth-url') {
       const params = provider === 'gmail' ? new URLSearchParams({ client_id: env('GMAIL_CLIENT_ID'), redirect_uri: redirectUri('gmail'), response_type: 'code', access_type: 'offline', prompt: 'consent', include_granted_scopes: 'true', scope: 'openid email https://www.googleapis.com/auth/gmail.readonly', state: state() })
-        : new URLSearchParams({ client_id: env('ZOHO_CLIENT_ID'), redirect_uri: redirectUri('zoho'), response_type: 'code', access_type: 'offline', prompt: 'consent', scope: 'ZohoMail.accounts.READ,ZohoMail.organization.accounts.READ,ZohoMail.messages.READ', state: state() });
+        : new URLSearchParams({ client_id: env('ZOHO_CLIENT_ID'), redirect_uri: redirectUri('zoho'), response_type: 'code', access_type: 'offline', prompt: 'consent', scope: 'ZohoMail.accounts.READ,ZohoMail.organization.accounts.READ,ZohoMail.messages.READ', access_type: 'offline', prompt: 'consent', state: state() });
       return response(200, { url: provider === 'gmail' ? `https://accounts.google.com/o/oauth2/v2/auth?${params}` : `https://accounts.zoho.com/oauth/v2/auth?${params}` });
     }
     const body = await request.json(); if (body.error || !body.code || !validState(body.state || '')) return response(400, { error: `${provider} authorization could not be completed.` });
@@ -296,6 +322,23 @@ Deno.serve(async request => {
     }) });
     const tokens = await tokenResponse.json(); if (!tokenResponse.ok || !tokens.refresh_token) return response(502, { error: `${provider} token exchange failed.` });
     let email: string | null = null; let accountCount = 1;
+    if (provider === 'zoho') {
+      const own = await fetch('https://mail.zoho.com/api/accounts', { headers: { Authorization: 'Zoho-oauthtoken ' + tokens.access_token } });
+      if (!own.ok) return response(502, { error: 'Zoho did not grant mailbox access.' });
+      const mailboxes = records(await own.json());
+      if (!mailboxes.length) return response(502, { error: 'Zoho returned no mailboxes for this sign-in.' });
+      const connected: string[] = [];
+      for (const mailbox of mailboxes) {
+        const id = field(mailbox, 'accountId', 'accountID');
+        const address = field(mailbox, 'primaryEmailAddress', 'mailboxAddress', 'mailId');
+        if (!id || !address) continue;
+        const { error } = await admin().from('communication_integrations').upsert({ provider: 'zoho:' + id, ...encryptToken(tokens.refresh_token), connected_at: new Date().toISOString(), account_count: 1, organization_name: address }, { onConflict: 'provider' });
+        if (error) throw error;
+        connected.push(address);
+      }
+      if (!connected.length) return response(502, { error: 'Zoho returned no usable mailbox identifiers.' });
+      return response(200, { connected: true, accountCount: connected.length, email: connected[0], mailboxes: connected });
+    }
     if (provider === 'gmail') {
       const profile = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', { headers: { Authorization: `Bearer ${tokens.access_token}` } });
       if (profile.ok) email = (await profile.json()).emailAddress ?? null;
