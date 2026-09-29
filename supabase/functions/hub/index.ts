@@ -294,10 +294,12 @@ async function listMessages(url: URL) {
   let query = admin().from('communication_messages').select('*', { count: 'exact' }).order('received_at', { ascending: false }).range(offset, offset + limit - 1);
   const provider = url.searchParams.get('provider'); const mailbox = url.searchParams.get('mailbox');
   if (provider) query = query.eq('provider', provider); if (mailbox) query = query.eq('mailbox_owner', mailbox);
+  query = provider === 'gmail' ? query.contains('provider_labels', ['INBOX']) : provider ? query : query.or('provider.neq.gmail,provider_labels.cs.{INBOX}');
   if (activeZoho) query = query.in('mailbox_owner', activeZoho);
   const { data, error, count } = await query; if (error) throw error;
   let mailboxQuery = admin().from('communication_messages').select('mailbox_owner');
   if (provider) mailboxQuery = mailboxQuery.eq('provider', provider);
+  mailboxQuery = provider === 'gmail' ? mailboxQuery.contains('provider_labels', ['INBOX']) : provider ? mailboxQuery : mailboxQuery.or('provider.neq.gmail,provider_labels.cs.{INBOX}');
   if (activeZoho) mailboxQuery = mailboxQuery.in('mailbox_owner', activeZoho);
   const { data: mailboxRows } = await mailboxQuery;
   const counts = new Map<string, number>(); for (const row of mailboxRows ?? []) counts.set(row.mailbox_owner, (counts.get(row.mailbox_owner) ?? 0) + 1);
@@ -318,7 +320,7 @@ Deno.serve(async request => {
   const path = url.pathname.replace(/^.*\/(?:functions\/v1\/)?hub(?=\/|$)/, '') || '/';
   if (request.method === 'OPTIONS') return new Response('ok', { headers: cors });
   try {
-    const maintenance = path === '/maintenance/gmail-spam' && request.method === 'POST' && request.headers.get('x-maintenance-key') === env('SUPABASE_SERVICE_ROLE_KEY');
+    const maintenance = path === '/maintenance/gmail-spam' && request.method === 'POST' && request.headers.get('x-maintenance-key') === env('HUB_MAINTENANCE_KEY');
     if (!maintenance) { const unauthorized = await requireIlya(request); if (unauthorized) return unauthorized; }
     
     if (path === '/maintenance/gmail-spam' && request.method === 'POST') {
