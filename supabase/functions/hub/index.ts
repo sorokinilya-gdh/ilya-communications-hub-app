@@ -99,35 +99,46 @@ async function gmailAccessToken() {
 async function syncGmail() {
   const db = admin(); const { accessToken, mailbox } = await gmailAccessToken();
   const { data: sync } = await db.from('communication_sync_state').select('*').eq('provider', 'gmail').maybeSingle();
-  const params = new URLSearchParams({ maxResults: '50' });
+  const params = new URLSearchParams({ maxResults: '100' });
   if (sync?.history_cursor) params.set('pageToken', sync.history_cursor);
   else if (sync?.initial_import_complete && sync.last_message_at) params.set('q', `after:${Math.floor(new Date(sync.last_message_at).getTime() / 1000)}`);
   const authorization = { Authorization: `Bearer ${accessToken}` };
   const listed = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?${params}`, { headers: authorization });
   if (!listed.ok) throw new Error(`Gmail list failed (${listed.status})`);
   const page = await listed.json(); const rows: any[] = [];
-  for (const item of page.messages ?? []) {
-    const detailParams = new URLSearchParams({ format: 'metadata' });
-    for (const name of ['From', 'To', 'Subject', 'Date']) detailParams.append('metadataHeaders', name);
-    const result = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(item.id)}?${detailParams}`, { headers: authorization });
-    if (!result.ok) continue;
-    const message = await result.json(); const sender = address(header(message, 'From'));
-    rows.push({ id: `gmail:${message.id}`, provider: 'gmail', mailbox_owner: mailbox || 'Gmail', thread_id: message.threadId,
-      sender_name: sender.name, sender_email: sender.email, recipients: [header(message, 'To')].filter(Boolean), subject: header(message, 'Subject') || '(No subject)',
-      preview: message.snippet || '', received_at: new Date(Number(message.internalDate || Date.now())).toISOString(), unread: message.labelIds?.includes('UNREAD') ?? false,
-      important: message.labelIds?.includes('IMPORTANT') ?? false, provider_labels: message.labelIds ?? [], raw_metadata: { providerId: message.id }, updated_at: new Date().toISOString() });
+  const items: any[] = page.messages ?? [];
+  const detailParams = new URLSearchParams({ format: 'metadata' });
+  for (const name of ['From', 'To', 'Subject', 'Date']) detailParams.append('metadataHeaders', name);
+  for (let start = 0; start < items.length; start += 10) {
+    const batch = await Promise.all(items.slice(start, start + 10).map(async item => {
+      const result = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(item.id)}?${detailParams}`, { headers: authorization });
+      if (!result.ok) throw new Error(`Gmail message ${item.id} failed (HTTP ${result.status}); page will be retried.`);
+      return result.json();
+    }));
+    for (const message of batch) {
+      const sender = address(header(message, 'From'));
+      rows.push({ id: `gmail:${message.id}`, provider: 'gmail', mailbox_owner: mailbox || 'Gmail', thread_id: message.threadId,
+        sender_name: sender.name, sender_email: sender.email, recipients: [header(message, 'To')].filter(Boolean), subject: header(message, 'Subject') || '(No subject)',
+        preview: message.snippet || '', received_at: new Date(Number(message.internalDate || Date.now())).toISOString(), unread: message.labelIds?.includes('UNREAD') ?? false,
+        important: message.labelIds?.includes('IMPORTANT') ?? false, provider_labels: message.labelIds ?? [], raw_metadata: { providerId: message.id }, updated_at: new Date().toISOString() });
+    }
   }
-  if (rows.length) await db.from('communication_messages').upsert(rows, { onConflict: 'id' });
+  if (rows.length) {
+    const { error } = await db.from('communication_messages').upsert(rows, { onConflict: 'id' });
+    if (error) throw new Error(`Gmail message storage failed: ${error.message}`);
+  }
   const newest = rows.map(row => row.received_at).sort().at(-1) ?? sync?.last_message_at ?? null;
-  await db.from('communication_sync_state').upsert({ provider: 'gmail', history_cursor: page.nextPageToken ?? null,
+  const { error: stateError } = await db.from('communication_sync_state').upsert({ provider: 'gmail', history_cursor: page.nextPageToken ?? null,
     initial_import_complete: !page.nextPageToken, last_message_at: newest, last_sync_at: new Date().toISOString(), last_error: null,
     imported_count: Number(sync?.imported_count ?? 0) + rows.length, updated_at: new Date().toISOString() });
+  if (stateError) throw new Error(`Gmail sync state storage failed: ${stateError.message}`);
   return { imported: rows.length, hasMore: Boolean(page.nextPageToken) };
 }
 
 function records(value: any): any[] {
   if (Array.isArray(value)) return value.filter(item => item && typeof item === 'object');
-  if (value && typeof value === 'object' && Array.isArray(value.data)) return records(value.data);
+  if (value && typeof value === 'object' && value.data) return records(value.data);
+  if (value && typeof value === 'object' && (value.accountId || value.accountID)) return [value];
   return [];
 }
 function field(record: any, ...keys: string[]) {
@@ -150,9 +161,32 @@ async function syncZoho() {
   const headers = { Authorization: `Zoho-oauthtoken ${token.access_token}` };
   const accountResult = await fetch('https://mail.zoho.com/api/accounts', { headers });
   if (!accountResult.ok) throw new Error(`Zoho account list failed (${accountResult.status})`);
-  const accounts = records(await accountResult.json());
+  const ownAccounts = records(await accountResult.json());
+  if (!ownAccounts.length) throw new Error('Zoho returned no accessible mailboxes. Reconnect the Zoho account with mailbox access.');
+  const accounts = new Map<string, any>();
+  for (const account of ownAccounts) {
+    const id = field(account, 'accountId', 'accountID');
+    if (id) accounts.set(id, account);
+  }
+  const discoveryErrors: string[] = [];
+  const organizationIds = [...new Set(ownAccounts.map(account => field(account.policyId, 'zoid')).filter(Boolean))];
+  if (!organizationIds.length) discoveryErrors.push('Zoho did not return an organization ID for mailbox discovery');
+  for (const zoid of organizationIds) {
+    for (let start = 0; start < 1000; start += 200) {
+      const result = await fetch(`https://mail.zoho.com/api/organization/${encodeURIComponent(zoid)}/accounts?start=${start}&limit=200`, { headers });
+      if (!result.ok) {
+        discoveryErrors.push(`Organization ${zoid} account discovery: HTTP ${result.status}`);
+        break;
+      }
+      const page = records(await result.json());
+      for (const account of page) {
+        const id = field(account, 'accountId', 'accountID');
+        if (id && !accounts.has(id)) accounts.set(id, account);
+      }
+      if (page.length < 200) break;
+    }
+  }
   const { data: sync } = await db.from('communication_sync_state').select('*').eq('provider', 'zoho').maybeSingle();
-  if (!accounts.length) throw new Error('Zoho returned no accessible mailboxes. Reconnect the Zoho account with mailbox access.');
   let cursors: Record<string, number> = {};
   try {
     const saved = JSON.parse(sync?.history_cursor || '{}');
@@ -161,7 +195,7 @@ async function syncZoho() {
     // Previous versions stored one shared numeric cursor; restart each mailbox safely.
   }
   const rows: any[] = []; const mailboxResults: any[] = []; const failures: string[] = [];
-  for (const account of accounts) {
+  for (const account of accounts.values()) {
     const accountId = field(account, 'accountId', 'accountID');
     if (!accountId) continue;
     const mailbox = field(account, 'primaryEmailAddress', 'mailboxAddress', 'mailId') || 'Zoho';
@@ -199,12 +233,12 @@ async function syncZoho() {
   }
   const newest = rows.map(row => row.received_at).sort().at(-1) ?? sync?.last_message_at ?? null;
   const hasMore = Object.values(cursors).some(cursor => cursor > 1);
-  const lastError = failures.length ? `Zoho mailbox sync failed: ${failures.join('; ')}` : null;
+  const warnings = [...discoveryErrors, ...failures];
+  const lastError = warnings.length ? `Zoho access: ${warnings.join('; ')}` : null;
   const { error: stateError } = await db.from('communication_sync_state').upsert({ provider: 'zoho', history_cursor: JSON.stringify(cursors), initial_import_complete: !hasMore,
     last_message_at: newest, last_sync_at: new Date().toISOString(), last_error: lastError, imported_count: Number(sync?.imported_count ?? 0) + rows.length, updated_at: new Date().toISOString() });
   if (stateError) throw new Error(`Zoho sync state storage failed: ${stateError.message}`);
-  if (failures.length) throw new Error(lastError!);
-  return { imported: rows.length, hasMore, mailboxCount: accounts.length, mailboxes: mailboxResults };
+  return { imported: rows.length, hasMore, mailboxCount: accounts.size, accessibleMailboxCount: mailboxResults.filter(row => !row.error).length, warnings, mailboxes: mailboxResults };
 }
 
 async function listMessages(url: URL) {
