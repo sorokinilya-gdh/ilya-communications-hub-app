@@ -320,24 +320,8 @@ Deno.serve(async request => {
   const path = url.pathname.replace(/^.*\/(?:functions\/v1\/)?hub(?=\/|$)/, '') || '/';
   if (request.method === 'OPTIONS') return new Response('ok', { headers: cors });
   try {
-    const maintenance = path === '/maintenance/gmail-spam' && request.method === 'POST' && request.headers.get('x-maintenance-key') === env('HUB_MAINTENANCE_KEY');
-    if (!maintenance) { const unauthorized = await requireIlya(request); if (unauthorized) return unauthorized; }
+    const unauthorized = await requireIlya(request); if (unauthorized) return unauthorized;
     
-    if (path === '/maintenance/gmail-spam' && request.method === 'POST') {
-      if (!maintenance) return response(403, { error: 'Maintenance authorization required.' });
-      const body = await request.json(); const ids = body.ids;
-      if (!Array.isArray(ids) || !ids.length || ids.length > 100 || ids.some((id: unknown) => typeof id !== 'string' || !/^gmail:[a-f0-9]+$/.test(id))) return response(400, { error: 'Invalid message selection.' });
-      const db = admin(); const { data: rows, error } = await db.from('communication_messages').select('id,provider_labels').in('id', ids);
-      if (error) throw error;
-      if (rows?.length !== new Set(ids).size || rows.some((row: any) => !row.provider_labels.includes('INBOX') || row.provider_labels.includes('SENT') || row.provider_labels.includes('IMPORTANT'))) return response(409, { error: 'Selection changed or contains protected mail.' });
-      const { accessToken } = await gmailAccessToken();
-      const moved = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/batchModify', { method: 'POST', headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ids: ids.map((id: string) => id.slice(6)), addLabelIds: ['SPAM'], removeLabelIds: ['INBOX'] }) });
-      if (!moved.ok) return response(moved.status, { error: 'Gmail rejected the label change.', detail: (await moved.text()).slice(0, 400) });
-      const updated = await Promise.all(rows.map((row: any) => db.from('communication_messages').update({ provider_labels: [...new Set([...row.provider_labels.filter((label: string) => label !== 'INBOX'), 'SPAM'])] }).eq('id', row.id)));
-      const failures = updated.filter((result: any) => result.error);
-      if (failures.length) throw new Error(`Gmail moved ${ids.length} messages, but ${failures.length} Hub label updates failed.`);
-      return response(200, { moved: ids.length });
-    }
     if (path === '/health') return response(200, { message: 'Success', platform: 'supabase-edge' });
     if (path === '/messages') return response(200, await listMessages(url));
     if (path === '/sync/gmail' && request.method === 'POST') return response(200, await syncGmail());
