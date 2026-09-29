@@ -1,4 +1,4 @@
-const CACHE = 'communications-hub-v1';
+const CACHE = 'communications-hub-v2';
 const BASE = '/ilya-communications-hub-app';
 const SHELL = [`${BASE}/`, `${BASE}/manifest.webmanifest`, `${BASE}/hub-icon.svg`, `${BASE}/hub-icon-180.png`, `${BASE}/hub-icon-512.png`];
 
@@ -14,11 +14,15 @@ self.addEventListener('activate', event => {
 
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
+  const url = new URL(event.request.url);
+  if (url.origin !== self.location.origin || !url.pathname.startsWith(BASE + '/')) return;
   event.respondWith(fetch(event.request).then(response => {
-    const copy = response.clone();
-    caches.open(CACHE).then(cache => cache.put(event.request, copy));
+    if (response.ok && response.type === 'basic') {
+      const copy = response.clone();
+      event.waitUntil(caches.open(CACHE).then(cache => cache.put(event.request, copy)));
+    }
     return response;
-  }).catch(() => caches.match(event.request).then(match => match || caches.match('/'))));
+  }).catch(() => caches.match(event.request).then(match => match || Response.error())));
 });
 
 self.addEventListener('push', event => {
