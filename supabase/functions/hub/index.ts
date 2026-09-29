@@ -191,20 +191,30 @@ async function syncZoho() {
     } catch (error) { discoveryErrors.push((credential.organization_name || credential.provider) + ': ' + (error instanceof Error ? error.message : 'connection failed')); }
   }
   const organizationIds = [...new Set(ownAccounts.map(account => field(account.policyId, 'zoid')).filter(Boolean))];
+  const organizationAccountIds = new Set(ownAccounts.map(account => field(account, 'accountId', 'accountID')).filter(Boolean));
+  let organizationLookupFailed = !organizationIds.length;
   if (!organizationIds.length) discoveryErrors.push('Zoho did not return an organization ID for mailbox discovery');
   for (const zoid of organizationIds) {
     for (let start = 0; start < 1000; start += 200) {
       const result = await fetch(`https://mail.zoho.com/api/organization/${encodeURIComponent(zoid)}/accounts?start=${start}&limit=200`, { headers });
       if (!result.ok) {
         discoveryErrors.push(`Organization ${zoid} account discovery: HTTP ${result.status}`);
+        organizationLookupFailed = true;
         break;
       }
       const page = records(await result.json());
       for (const account of page) {
         const id = field(account, 'accountId', 'accountID');
-        if (id && !accounts.has(id)) accounts.set(id, account);
+        if (id) { organizationAccountIds.add(id); if (!accounts.has(id)) accounts.set(id, account); }
       }
       if (page.length < 200) break;
+    }
+  }
+  if (!organizationLookupFailed) {
+    for (const [id, account] of accounts) {
+      if (organizationAccountIds.has(id)) continue;
+      accounts.delete(id); accessById.delete(id);
+      authorizedEmails.delete(field(account, 'primaryEmailAddress', 'mailboxAddress', 'mailId'));
     }
   }
   const { data: sync } = await db.from('communication_sync_state').select('*').eq('provider', 'zoho').maybeSingle();
@@ -275,12 +285,20 @@ async function syncZoho() {
 async function listMessages(url: URL) {
   const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 200), 1), 500);
   const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
+  let activeZoho: string[] | null = null;
+  if (url.searchParams.get('provider') === 'zoho') {
+    const { data: state } = await admin().from('communication_sync_state').select('history_cursor').eq('provider', 'zoho').maybeSingle();
+    try { const saved = JSON.parse(state?.history_cursor || '{}'); if (Array.isArray(saved.organizationMailboxes)) activeZoho = saved.organizationMailboxes; } catch { /* legacy sync state */ }
+    if (activeZoho && !activeZoho.length) return { messages: [], total: 0, mailboxes: [] };
+  }
   let query = admin().from('communication_messages').select('*', { count: 'exact' }).order('received_at', { ascending: false }).range(offset, offset + limit - 1);
   const provider = url.searchParams.get('provider'); const mailbox = url.searchParams.get('mailbox');
   if (provider) query = query.eq('provider', provider); if (mailbox) query = query.eq('mailbox_owner', mailbox);
+  if (activeZoho) query = query.in('mailbox_owner', activeZoho);
   const { data, error, count } = await query; if (error) throw error;
   let mailboxQuery = admin().from('communication_messages').select('mailbox_owner');
   if (provider) mailboxQuery = mailboxQuery.eq('provider', provider);
+  if (activeZoho) mailboxQuery = mailboxQuery.in('mailbox_owner', activeZoho);
   const { data: mailboxRows } = await mailboxQuery;
   const counts = new Map<string, number>(); for (const row of mailboxRows ?? []) counts.set(row.mailbox_owner, (counts.get(row.mailbox_owner) ?? 0) + 1);
   return { messages: (data ?? []).map(uiMessage), total: count ?? 0, mailboxes: [...counts].map(([email, count]) => ({ email, count })) };
