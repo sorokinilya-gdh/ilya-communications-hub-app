@@ -22,3 +22,5 @@
 
 .email-html-frame{max-width:100%!important;overflow:hidden!important;box-sizing:border-box!important}
 .reader-body{min-width:0!important;overflow-x:hidden!important}
+
+.message-spam{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;height:28px;padding:0 7px;border-radius:6px;color:#9a6a1d;font-size:11px;font-weight:700;cursor:pointer}.message-spam:hover{background:#fff4d8;color:#7b4e00}
