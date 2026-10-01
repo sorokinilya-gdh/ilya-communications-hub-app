@@ -1,0 +1,5 @@
+import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';
+const s=fs.readFileSync('supabase/functions/hub/index.ts','utf8'),a=s.indexOf('    const ids=page.map('),b=s.indexOf('    cursors[accountId]',a);let active=0,peak=0,count=0;
+const context={page:Array.from({length:26},(_,i)=>({messageId:String(i)})),accountId:'acct',mailboxHeaders:{},field:(x,...keys)=>keys.map(k=>x[k]).find(Boolean)||'',db:{from:()=>({select:()=>({in:async()=>({data:[{id:'zoho:acct:0',raw_metadata:{html:'stored',body:'stored'}}]})})})},fetch:async()=>{count++;active++;peak=Math.max(peak,active);await new Promise(r=>setTimeout(r,2));active--;return{ok:true,json:async()=>({data:{content:'hydrated'}})}}};
+vm.createContext(context);const bodies=await vm.runInContext('(async()=>{'+s.slice(a,b)+'return bodies})()',context);
+assert.equal(count,25);assert.ok(peak<=12&&peak>1);assert.equal(bodies.get('zoho:acct:0').body,'stored');assert.equal(bodies.get('zoho:acct:1').body,'hydrated');console.log('PASS: existing content reused, all missing content hydrated, concurrency capped at 12');
