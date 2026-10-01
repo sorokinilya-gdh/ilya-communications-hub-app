@@ -19,3 +19,6 @@
 .email-html-frame{display:block;width:100%;min-height:900px;border:0;background:#fff;margin:16px 0 24px;border-radius:8px}
 
 .subject-row{gap:7px}.subject-row .subject{flex:1;min-width:0}.message-delete{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:28px;height:28px;border-radius:6px;color:#879399;cursor:pointer}.message-delete:hover{background:#feeceb;color:#a23d35}.message-delete:focus-visible{outline:2px solid #2f7469;outline-offset:1px}
+
+.email-html-frame{max-width:100%!important;overflow:hidden!important;box-sizing:border-box!important}
+.reader-body{min-width:0!important;overflow-x:hidden!important}
