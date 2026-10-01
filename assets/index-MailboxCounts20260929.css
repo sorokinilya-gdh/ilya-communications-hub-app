@@ -26,3 +26,5 @@
 .message-spam{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;height:28px;padding:0 7px;border-radius:6px;color:#9a6a1d;font-size:11px;font-weight:700;cursor:pointer}.message-spam:hover{background:#fff4d8;color:#7b4e00}
 
 .message-archive{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:28px;height:28px;border-radius:6px;color:#687b80;cursor:pointer}.message-archive:hover{background:#e8f3f0;color:#27685e}
+
+.message-important{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:6px;color:#839095;cursor:pointer}.message-important:hover,.message-important.active{background:#fff3cf;color:#b57b00}.important-summary{border-color:#e5bd62!important;background:#fff9e9!important}
