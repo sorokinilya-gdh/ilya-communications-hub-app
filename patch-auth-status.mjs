@@ -1,0 +1,7 @@
+import fs from 'node:fs';let s=fs.readFileSync('assets/index-OAuthReturn20261001.js','utf8');
+function patch(old,next){if(!s.includes(old))throw Error('Patch anchor missing');s=s.replace(old,next)}
+patch('F.useEffect(()=>{async function loadAllHubPages20260929','const hubStartupRef=F.useRef(false);F.useEffect(()=>{if(hubStartupRef.current)return;hubStartupRef.current=true;async function loadAllHubPages20260929');
+patch('D("Zoho mailbox authorized: "+String(Xe.data.email||"connected account")+"."),await S()','localStorage.setItem("hub:last-authorization","Zoho mailbox authorized: "+String(Xe.data.email||"connected account")+"."),D("Zoho mailbox authorized: "+String(Xe.data.email||"connected account")+"."),await S()');
+patch('catch{D("Zoho authorization could not be completed. Please reconnect.")}','catch(e){const message="Zoho authorization failed: "+(e instanceof Error?e.message:"Reconnect this mailbox.");localStorage.setItem("hub:last-authorization",message);D(message)}');
+patch('className:"connections-page",children:[','className:"connections-page",children:[localStorage.getItem("hub:last-authorization")&&m.jsx("p",{className:"notice",role:"status",children:localStorage.getItem("hub:last-authorization")}),');
+fs.writeFileSync('assets/index-AuthStatus20261001.js',s);fs.writeFileSync('index.html',fs.readFileSync('index.html','utf8').replace('index-OAuthReturn20261001.js','index-AuthStatus20261001.js'));
