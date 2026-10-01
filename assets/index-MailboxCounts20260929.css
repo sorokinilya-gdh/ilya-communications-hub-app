@@ -15,3 +15,5 @@
 .messages::-webkit-scrollbar,.reader::-webkit-scrollbar{width:14px!important;display:block!important}
 .messages::-webkit-scrollbar-track,.reader::-webkit-scrollbar-track{background:#edf1f2!important}
 .messages::-webkit-scrollbar-thumb,.reader::-webkit-scrollbar-thumb{background:#7b8b8f!important;border:3px solid #edf1f2!important;border-radius:10px!important}
+
+.email-html-frame{display:block;width:100%;min-height:900px;border:0;background:#fff;margin:16px 0 24px;border-radius:8px}
