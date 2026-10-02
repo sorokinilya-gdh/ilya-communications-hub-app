@@ -170,9 +170,10 @@ async function syncGmail(recentOnly = false) {
     maxResults: recentOnly ? '50' : '250',
     includeSpamTrash: 'true'
   });
-  if (sync?.history_cursor) params.set('pageToken', sync.history_cursor);
-  else if (sync?.initial_import_complete && sync.last_message_at) params.set('q', `after:${Math.floor(new Date(sync.last_message_at).getTime() / 1000) - 1}`);
-  else if (recentOnly) params.set('q', 'newer_than:1d');
+  let savedCursor=null;try{savedCursor=JSON.parse(sync?.history_cursor||'null')}catch{}
+  if(sync?.history_cursor){params.set('pageToken',savedCursor?.pageToken||sync.history_cursor);if(savedCursor?.query)params.set('q',savedCursor.query)}
+  else if(sync?.initial_import_complete&&sync.last_message_at)params.set('q','after:'+String(Math.floor(new Date(sync.last_message_at).getTime()/1000)-1));
+  else if(recentOnly)params.set('q','after:'+String(Math.floor(Date.now()/1000)-86400));
   const authorization = {
     Authorization: `Bearer ${accessToken}`
   };
@@ -239,7 +240,7 @@ async function syncGmail(recentOnly = false) {
   const newest = latestStored?.received_at ?? sync?.last_message_at ?? null;
   const { error: stateError } = await db.from('communication_sync_state').upsert({
     provider: syncProvider,
-    history_cursor: page.nextPageToken ?? null,
+    history_cursor: page.nextPageToken ? JSON.stringify({pageToken:page.nextPageToken,query:params.get('q')||''}) : null,
     initial_import_complete: !page.nextPageToken,
     last_message_at: newest,
     last_sync_at: new Date().toISOString(),
