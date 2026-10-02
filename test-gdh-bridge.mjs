@@ -1,0 +1,17 @@
+import fs from 'node:fs';import vm from 'node:vm';import assert from 'node:assert/strict';import {createHash,timingSafeEqual} from 'node:crypto';
+const source=fs.readFileSync('supabase/functions/hub/index.ts','utf8'),key='fixture-bridge-key',vars={};let sent=0,readScope;
+const c={Deno:{env:{get:k=>vars[k]}},Date,Buffer,createHash,timingSafeEqual,response:(status,body)=>({status,body}),listMessages:async(u,scope)=>{readScope=[...scope];return{messages:[]}},sendGmail:async()=>{sent++;return{providerMessageId:'fixture'}},sendZoho:async()=>{sent++;return{providerMessageId:'fixture'}}};
+vm.createContext(c);vm.runInContext(source.slice(source.indexOf('const bridgeMailboxes ='),source.indexOf('Deno.serve(')),c);
+const req=(token=key,payload={},method='POST')=>({method,headers:new Headers({authorization:'Bearer '+token}),json:async()=>payload});const url=new URL('https://example.invalid/hub/bridge/messages');
+assert.equal((await c.handleGdhBridge(req(),'/bridge/send',url)).status,503);
+vars.GDH_BRIDGE_KEY_SHA256=createHash('sha256').update(key).digest('hex');vars.GDH_BRIDGE_EXPIRES_AT=new Date(Date.now()+60000).toISOString();
+assert.equal((await c.handleGdhBridge(req('wrong'),'/bridge/send',url)).status,401);
+assert.equal((await c.handleGdhBridge(req(),'/bridge/integrations',url)).status,404);
+assert.equal((await c.handleGdhBridge(req(key,{},'GET'),'/bridge/messages',url)).status,200);assert.deepEqual(readScope,['ceo@aimicrotec.com','is@gdh.ltd']);
+const payload={provider:'gmail',from:'ceo@aimicrotec.com',to:['is@gdh.ltd'],subject:'fixture',body:'fixture'};
+assert.equal((await c.handleGdhBridge(req(key,{...payload,to:['outside@example.invalid']}),'/bridge/send',url)).status,403);
+assert.equal((await c.handleGdhBridge(req(key,{...payload,provider:'zoho'}),'/bridge/send',url)).status,400);assert.equal(sent,0);
+assert.equal((await c.handleGdhBridge(req(key,payload),'/bridge/send',url)).status,200);assert.equal(sent,1);
+vars.GDH_BRIDGE_EXPIRES_AT=new Date(Date.now()-1).toISOString();assert.equal((await c.handleGdhBridge(req(key,payload),'/bridge/send',url)).status,503);assert.equal(sent,1);
+assert.ok(!source.includes("path === '/test-searches'"));assert.equal((source.match(/allowedMailboxes\)\w*=\w*\.in\('mailbox_owner',allowedMailboxes\)/g)||[]).length,2);
+console.log('PASS: disabled/expired/invalid key denied; two-mailbox reads; sender/provider/recipient scope; unrelated routes denied; obsolete key bypass removed.');

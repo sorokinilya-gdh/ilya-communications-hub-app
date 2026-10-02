@@ -532,7 +532,7 @@ async function syncZoho() {
     mailboxes: mailboxResults
   };
 }
-async function listMessages(url) {
+async function listMessages(url, allowedMailboxes=null) {
   const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 200), 1), 500);
   const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
   let activeZoho = null;
@@ -558,6 +558,7 @@ async function listMessages(url) {
   const search = (url.searchParams.get('search') || '').trim();
   const folder = (url.searchParams.get('folder') || '').toLowerCase();
   const allFolders = url.searchParams.get('allFolders') === 'true' || Boolean(search) || Boolean(folder);
+  if(allowedMailboxes)query=query.in('mailbox_owner',allowedMailboxes);
   if (provider) query = query.eq('provider', provider);
   if (mailbox) query = query.eq('mailbox_owner', mailbox);
   if (search) {
@@ -574,6 +575,7 @@ async function listMessages(url) {
   const { data, error, count } = await query;
   if (error) throw error;
   let mailboxQuery = admin().from('communication_messages').select('mailbox_owner');
+  if(allowedMailboxes)mailboxQuery=mailboxQuery.in('mailbox_owner',allowedMailboxes);
   if (provider) mailboxQuery = mailboxQuery.eq('provider', provider);
   mailboxQuery = provider === 'gmail' ? mailboxQuery.contains('provider_labels', [
     'INBOX'
@@ -663,6 +665,26 @@ async function sendZoho(payload) {
  }}
  throw new Error(rejected||'Zoho sender is not connected');
 }
+
+const bridgeMailboxes = ['ceo@aimicrotec.com','is@gdh.ltd'];
+async function handleGdhBridge(request,path,url) {
+ const expected=Deno.env.get('GDH_BRIDGE_KEY_SHA256');
+ const expires=Date.parse(Deno.env.get('GDH_BRIDGE_EXPIRES_AT')||'');
+ if(!expected||!Number.isFinite(expires)||Date.now()>=expires)return response(503,{error:'GDH bridge is not enabled.'});
+ const token=request.headers.get('authorization')?.replace(/^Bearer\s+/i,'')||'';
+ const actual=createHash('sha256').update(token).digest('hex');
+ if(!/^[a-f0-9]{64}$/.test(expected)||!token||!timingSafeEqual(Buffer.from(actual),Buffer.from(expected)))return response(401,{error:'Bridge authentication required.'});
+ if((path==='/bridge/messages'||path==='/bridge/search')&&request.method==='GET')return response(200,await listMessages(url,bridgeMailboxes));
+ if(path==='/bridge/send'&&request.method==='POST'){
+  const payload=await request.json();const from=String(payload.from||'').toLowerCase();const to=Array.isArray(payload.to)?payload.to.map(x=>String(x).toLowerCase()):[];
+  if(!bridgeMailboxes.includes(from)||!to.length||to.some(x=>!bridgeMailboxes.includes(x)))return response(403,{error:'Bridge test is restricted to the two approved mailboxes.'});
+  const provider=String(payload.provider||'').toLowerCase();if((from==='ceo@aimicrotec.com'&&provider!=='gmail')||(from==='is@gdh.ltd'&&provider!=='zoho'))return response(400,{error:'Sender and provider do not match.'});
+  if(!payload.subject||typeof payload.body!=='string')return response(400,{error:'Subject and body are required.'});
+  const result=provider==='gmail'?await sendGmail({...payload,from,to}):await sendZoho({...payload,from,to});return response(200,{sent:true,...result});
+ }
+ return response(404,{error:'Bridge operation unavailable.'});
+}
+
 Deno.serve(async (request)=>{
   const url = new URL(request.url);
   const path = url.pathname.replace(/^.*\/(?:functions\/v1\/)?hub(?=\/|$)/, '') || '/';
@@ -670,18 +692,7 @@ Deno.serve(async (request)=>{
     headers: cors
   });
   try {
-    if (path === '/test-searches' && request.headers.get('x-uat-key') === Deno.env.get('TOKEN_ENCRYPTION_KEY')) {
-      const terms = ['Stephen M. Savage','stephensavage.recruiter@gmail.com','Financial Technology Leadership Opportunity','Chief Executive Officer Financial Technology Trading Platforms','CEO Opportunity','Stephen Savage','Trading Platforms','position description','compensation'];
-      const results = [];
-      for (const term of terms) {
-        const testUrl = new URL(request.url);
-        testUrl.searchParams.set('search', term);
-        testUrl.searchParams.set('allFolders', 'true');
-        const found = await listMessages(testUrl);
-        results.push({ term, total: found.total, messages: found.messages.slice(0, 10) });
-      }
-      return response(200, { results });
-    }
+    if(path.startsWith('/bridge/'))return await handleGdhBridge(request,path,url);
     const unauthorized = await requireIlya(request);
     if (unauthorized) return unauthorized;
     if (path === '/health') return response(200, {
