@@ -1,0 +1,1 @@
+import fs from'node:fs';const p='assets/index-ContactIntelligence20261002.js';let s=fs.readFileSync(p,'utf8');s=s.replace("if(!data.done)timer=setTimeout(batch,3000)","timer=setTimeout(batch,data.done?60000:3000)");fs.writeFileSync(p,s);console.log('New mail is checked every minute after the initial incremental review.');
