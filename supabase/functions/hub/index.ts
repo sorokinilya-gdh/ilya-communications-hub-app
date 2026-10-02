@@ -150,6 +150,10 @@ async function gmailAccessToken(recordOverride = null) {
     mailbox: record.organization_name
   };
 }
+async function persistMessageRows(rows, provider) {
+ const ordered=[...rows].sort((a,b)=>String(a.id).localeCompare(String(b.id)));
+ for(let start=0;start<ordered.length;start+=10){const{error}=await admin().from('communication_messages').upsert(ordered.slice(start,start+10),{onConflict:'id'});if(error)throw new Error(provider+' message storage failed: '+error.message);}
+}
 async function syncGmail(recentOnly = false) {
   const db = admin();
   const { data: gmailRecords, error: gmailRecordsError } = await db.from('communication_integrations').select('*').or('provider.eq.gmail,provider.like.gmail:%');
@@ -227,10 +231,7 @@ async function syncGmail(recentOnly = false) {
   }
   if (rows.length) {
     await applyLearnedRules(rows);
-    const { error } = await db.from('communication_messages').upsert(rows, {
-      onConflict: 'id'
-    });
-    if (error) throw new Error(`Gmail message storage failed: ${error.message}`);
+    await persistMessageRows(rows, 'Gmail');
   }
   const { data: latestStored } = await db.from('communication_messages').select('received_at').eq('provider', 'gmail').eq('mailbox_owner', mailbox).order('received_at', {
     ascending: false
@@ -488,10 +489,7 @@ async function syncZoho() {
   }
   if (rows.length) {
     await applyLearnedRules(rows);
-    const { error } = await db.from('communication_messages').upsert(rows, {
-      onConflict: 'id'
-    });
-    if (error) throw new Error(`Zoho message storage failed: ${error.message}`);
+    await persistMessageRows(rows, 'Zoho');
   }
   const newest = rows.map((row)=>row.received_at).sort().at(-1) ?? sync?.last_message_at ?? null;
   const hasMore = Object.values(cursors).some((cursor)=>cursor > 1);

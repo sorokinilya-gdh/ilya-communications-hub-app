@@ -1,0 +1,1 @@
+import fs from 'node:fs';const file='test-recent-gmail.mjs';let s=fs.readFileSync(file,'utf8');s=s.replace("a=s.indexOf('async function syncGmail(')","a=s.indexOf('async function persistMessageRows(')");fs.writeFileSync(file,s);
