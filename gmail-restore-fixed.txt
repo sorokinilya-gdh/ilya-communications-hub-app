@@ -1,0 +1,9 @@
+async function mutateGmail(payload,action){
+ const db=admin(),mailbox=String(payload.mailbox||'').toLowerCase();const {data:records,error}=await db.from('communication_integrations').select('*').or('provider.eq.gmail,provider.like.gmail:%');if(error)throw error;
+ const record=(records||[]).find(r=>String(r.organization_name||'').toLowerCase()===mailbox);if(!record)throw new Error('Gmail mailbox is not connected');const {accessToken}=await gmailAccessToken(record),id=providerActionId(payload);if(!id)throw new Error('Gmail message id required');if(!['trash','restore'].includes(action))throw new Error('Unsupported Gmail action');
+ const root='https://gmail.googleapis.com/gmail/v1/users/me/messages/'+encodeURIComponent(id),headers={Authorization:'Bearer '+accessToken,'Content-Type':'application/json'};
+ if(action==='trash'){const result=await fetch(root+'/trash',{method:'POST',headers});if(!result.ok)throw new Error('Gmail trash failed: '+result.status);return{ok:true,provider:'gmail',action,id};}
+ const {data:row,error:rowError}=await db.from('communication_messages').select('raw_metadata,provider_labels').eq('id','gmail:'+id).eq('mailbox_owner',mailbox).maybeSingle();if(rowError)throw rowError;
+ if(!row||row.raw_metadata?.hubFolder==='trash'||(row.provider_labels||[]).includes('TRASH')){const result=await fetch(root+'/untrash',{method:'POST',headers});if(!result.ok)throw new Error('Gmail restore failed: '+result.status);}
+ const result=await fetch(root+'/modify',{method:'POST',headers,body:JSON.stringify({addLabelIds:['INBOX'],removeLabelIds:['SPAM']})});if(!result.ok)throw new Error('Gmail inbox restore failed: '+result.status);return{ok:true,provider:'gmail',action,id};
+}
