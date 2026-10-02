@@ -93,7 +93,7 @@ function header(message, name) {
 function decodeB64Url(value=''){if(!value)return'';try{return Buffer.from(value.replace(/-/g,'+').replace(/_/g,'/'),'base64').toString('utf8')}catch{return''}}
 function gmailBody(payload){if(!payload)return'';const plain=[],html=[];const walk=(part)=>{const mime=String(part.mimeType||'').toLowerCase(),text=decodeB64Url(part.body?.data||'');if(text){if(mime==='text/plain')plain.push(text);else if(mime==='text/html')html.push(text)}for(const child of part.parts||[])walk(child)};walk(payload);const raw=plain.join('\n').trim()||html.join('\n').replace(/<style[\s\S]*?<\/style>/gi,' ').replace(/<script[\s\S]*?<\/script>/gi,' ').replace(/<br\s*\/?\s*>/gi,'\n').replace(/<\/p>/gi,'\n').replace(/<[^>]+>/g,' ').replace(/&nbsp;/g,' ').replace(/&#39;/g,"'").replace(/&amp;/g,'&').replace(/&quot;/g,'"').trim();return raw.replace(/\r/g,'').replace(/\n{3,}/g,'\n\n').replace(/[ \t]{2,}/g,' ')}
 function gmailContent(payload){if(!payload)return{body:'',html:''};const plain=[],html=[];const walk=(part)=>{const mime=String(part.mimeType||'').toLowerCase(),text=decodeB64Url(part.body?.data||'');if(text){if(mime==='text/plain')plain.push(text);else if(mime==='text/html')html.push(text)}for(const child of part.parts||[])walk(child)};walk(payload);return{body:plain.join('\n').trim()||gmailBody(payload),html:html.join('\n').trim()}}
-function decodeMailEntities(v=''){return String(v).replace(/&quot;/gi,'"').replace(/&amp;/gi,'&').replace(/&lt;/gi,'<').replace(/&gt;/gi,'>')}
+function decodeMailEntities(v=''){return String(v).replace(/&#(\d+);/g,(_,n)=>String.fromCodePoint(Number(n))).replace(/&#x([0-9a-f]+);/gi,(_,n)=>String.fromCodePoint(parseInt(n,16))).replace(/&apos;/gi,"'").replace(/&quot;/gi,'"').replace(/&amp;/gi,'&').replace(/&lt;/gi,'<').replace(/&gt;/gi,'>')}
 function formIdentity(senderName='',senderEmail='',subject='',body=''){const text=decodeMailEntities(body||'');const lines=text.split(/\r?\n/);let name='',email='';for(const line of lines){const i=line.indexOf(':');if(i<0)continue;const key=line.slice(0,i).trim().toLowerCase(),value=line.slice(i+1).trim();if(key==='name'&&!name)name=value;if(key==='email'&&!email&&value.includes('@'))email=value.split(/\s/)[0]}const isForm=Boolean(name&&email&&(text.toLowerCase().includes('message:')||subject.toLowerCase().includes('contact')));return isForm?{sender_name:name,sender_email:email,technical_sender_name:senderName,technical_sender_email:senderEmail,source_type:'website_form'}:{sender_name:senderName,sender_email:senderEmail,technical_sender_name:'',technical_sender_email:'',source_type:'email'}}
 function uiMessage(row) {
   return {
@@ -105,6 +105,7 @@ function uiMessage(row) {
     preview: row.preview,
     body: row.raw_metadata?.body || row.preview,
     html: row.raw_metadata?.html || '',
+    bodyHydrated: row.raw_metadata?.bodyHydrated === true,
     provider: row.provider === 'gmail' ? 'Gmail' : 'Zoho',
     time: row.received_at,
     unread: row.unread,
@@ -443,7 +444,7 @@ async function syncZoho() {
     const bodies=new Map((stored||[]).filter(row=>row.raw_metadata?.html||row.raw_metadata?.bodyHydrated).map(row=>[row.id,row.raw_metadata]));
     for(let batch=0;batch<page.length;batch+=12){await Promise.all(page.slice(batch,batch+12).map(async message=>{
       const providerId=field(message,'messageId','messageID'),id='zoho:'+accountId+':'+providerId;if(!providerId||bodies.has(id))return;
-      try{const detail=await fetch('https://mail.zoho.com/api/accounts/'+encodeURIComponent(accountId)+'/messages/'+encodeURIComponent(providerId)+'/content',{headers:mailboxHeaders});if(detail.ok){const json=await detail.json(),content=json?.data||json,html=field(content,'content','htmlContent')||'',body=html||field(content,'plainText','textContent');if(body)bodies.set(id,{body,html,bodyHydrated:true})}}catch{}
+      try{const detail=await fetch('https://mail.zoho.com/api/accounts/'+encodeURIComponent(accountId)+'/folders/'+encodeURIComponent(field(message,'folderId','folderID'))+'/messages/'+encodeURIComponent(providerId)+'/content?includeBlockContent=true',{headers:mailboxHeaders});if(detail.ok){const json=await detail.json(),content=json?.data||json,html=field(content,'content','htmlContent')||'',body=html||field(content,'plainText','textContent');if(body)bodies.set(id,{body,html,bodyHydrated:true})}}catch{}
     }))}
     cursors[accountId] = savedCursor < 0 ? -1 : page.length === 200 ? start + 200 : -1;
     mailboxResults.push({
@@ -535,6 +536,21 @@ async function syncZoho() {
     mailboxes: mailboxResults
   };
 }
+async function loadFullMessage(id,allowedMailboxes=null){
+ const db=admin();let query=db.from('communication_messages').select('*').eq('id',id);if(allowedMailboxes)query=query.in('mailbox_owner',allowedMailboxes);const {data:row,error}=await query.maybeSingle();if(error)throw error;if(!row)return response(404,{error:'Message not found'});
+ let meta={...(row.raw_metadata||{})};if(meta.bodyHydrated===true)return response(200,{message:uiMessage(row)});
+ if(row.provider==='gmail'){
+  const {data:records,error:e}=await db.from('communication_integrations').select('*').or('provider.eq.gmail,provider.like.gmail:%');if(e)throw e;const record=(records||[]).find(r=>String(r.organization_name||'').toLowerCase()===String(row.mailbox_owner).toLowerCase());if(!record)throw Error('Gmail mailbox is not connected');const {accessToken}=await gmailAccessToken(record);const result=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+encodeURIComponent(meta.providerId||id.replace(/^gmail:/,''))+'?format=full',{headers:{Authorization:'Bearer '+accessToken}});if(!result.ok)throw Error('Full Gmail message unavailable: '+result.status);const message=await result.json();meta={...meta,...gmailContent(message.payload),bodyHydrated:true};
+ }else if(row.provider==='zoho'){
+  const {data:records,error:e}=await db.from('communication_integrations').select('*').or('provider.eq.zoho,provider.like.zoho:%');if(e)throw e;const mailbox=String(row.mailbox_owner).toLowerCase();const ordered=[...(records||[])].sort((a,b)=>Number(String(b.organization_name||'').toLowerCase()===mailbox)-Number(String(a.organization_name||'').toLowerCase()===mailbox));let loaded=false;
+  for(const record of ordered){const refreshed=await fetch('https://accounts.zoho.com/oauth/v2/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'refresh_token',client_id:env('ZOHO_CLIENT_ID'),client_secret:env('ZOHO_CLIENT_SECRET'),refresh_token:decryptToken(record)})});const token=await refreshed.json();if(!refreshed.ok||!token.access_token)continue;const headers={Authorization:'Zoho-oauthtoken '+token.access_token};const accounts=await fetch('https://mail.zoho.com/api/accounts',{headers});if(!accounts.ok)continue;const account=extractAccountRecords(await accounts.json()).find(a=>field(a,'primaryEmailAddress','mailboxAddress','mailId').toLowerCase()===mailbox);if(!account)continue;const accountId=field(account,'accountId','accountID'),messageId=String(meta.providerId||id.split(':').pop());if(String(meta.accountId||accountId)!==accountId)continue;let folderId=String(meta.folderId||'');
+   if(!/^\d+$/.test(folderId)){const page=await fetch('https://mail.zoho.com/api/accounts/'+accountId+'/messages/view?limit=200&sortBy=date&sortorder=false',{headers});if(page.ok){const found=extractAccountRecords(await page.json()).find(m=>field(m,'messageId','messageID')===messageId);if(found)folderId=field(found,'folderId','folderID');}}if(!/^\d+$/.test(folderId))throw Error('Message folder unavailable. Refresh this mailbox and retry.');
+   const result=await fetch('https://mail.zoho.com/api/accounts/'+accountId+'/folders/'+folderId+'/messages/'+encodeURIComponent(messageId)+'/content?includeBlockContent=true',{headers});const json=await result.json().catch(()=>({})),status=Number(json.status?.code||result.status);if(status===401||status===403)continue;if(!result.ok||status!==200)throw Error('Full Zoho message unavailable: '+status);const data=json.data||json;if(typeof data.content!=='string'&&typeof data.plainText!=='string'&&typeof data.textContent!=='string')throw Error('Zoho did not return full message content');const html=String(data.content||data.htmlContent||'');meta={...meta,accountId,folderId,body:html||String(data.plainText||data.textContent||''),html,bodyHydrated:true};loaded=true;break;
+  }if(!loaded)throw Error('This Zoho mailbox requires message-read authorization');
+ }else throw Error('Unsupported message provider');
+ const saved=await db.from('communication_messages').update({raw_metadata:meta,updated_at:new Date().toISOString()}).eq('id',row.id).eq('mailbox_owner',row.mailbox_owner);if(saved.error)throw saved.error;return response(200,{message:uiMessage({...row,raw_metadata:meta})});
+}
+
 async function listMessages(url, allowedMailboxes=null) {
   const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 200), 1), 500);
   const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
@@ -722,6 +738,7 @@ async function handleGdhBridge(request,path,url) {
  if(path==='/bridge/message/action'&&request.method==='POST'){const payload=await request.json();const mailbox=String(payload.mailbox||'').toLowerCase(),provider=String(payload.provider||'').toLowerCase();if(!bridgeMailboxes.includes(mailbox)||(mailbox==='ceo@aimicrotec.com'&&provider!=='gmail')||(mailbox==='is@gdh.ltd'&&provider!=='zoho'))return response(403,{error:'Message action mailbox is outside the authorized bridge scope.'});const stored=await admin().from('communication_messages').select('mailbox_owner,provider').eq('id',String(payload.id||'')).maybeSingle();if(stored.error)throw stored.error;if(stored.data&&(String(stored.data.mailbox_owner||'').toLowerCase()!==mailbox||stored.data.provider!==provider))return response(403,{error:'Message record is outside bridge scope.'});return await executeMessageAction({...payload,mailbox,provider});}
  if(path==='/bridge/attention'&&request.method==='GET')return response(200,await listExecutiveAttention(url.searchParams.get('all')==='true'));
  if(path==='/bridge/attention'&&request.method==='POST')return await publishExecutiveAttention(await request.json());
+ if(path==='/bridge/message/content'&&request.method==='GET')return await loadFullMessage(url.searchParams.get('id')||'',bridgeMailboxes);
  if((path==='/bridge/messages'||path==='/bridge/search')&&request.method==='GET')return response(200,await listMessages(url,bridgeMailboxes));
  if(path==='/bridge/send'&&request.method==='POST'){
   const payload=await request.json();const from=String(payload.from||'').toLowerCase();const to=Array.isArray(payload.to)?payload.to.map(x=>String(x).toLowerCase()):[];
@@ -758,6 +775,7 @@ Deno.serve(async (request)=>{
     }
     if(path==='/executive-attention'&&request.method==='GET')return response(200,await listExecutiveAttention());
     if(path==='/executive-attention/action'&&request.method==='POST')return await resolveExecutiveAttention(await request.json());
+    if(path==='/message/content'&&request.method==='GET')return await loadFullMessage(url.searchParams.get('id')||'');
     if (path === '/messages') return response(200, await listMessages(url));
     if (path === '/search') return response(200, await listMessages(url));
     if(path==='/message/action'&&request.method==='POST')return await executeMessageAction(await request.json());

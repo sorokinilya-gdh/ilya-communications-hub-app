@@ -13,5 +13,5 @@ assert.equal((await c.handleGdhBridge(req(key,{...payload,to:['outside@example.i
 assert.equal((await c.handleGdhBridge(req(key,{...payload,provider:'zoho'}),'/bridge/send',url)).status,400);assert.equal(sent,0);
 assert.equal((await c.handleGdhBridge(req(key,payload),'/bridge/send',url)).status,200);assert.equal(sent,1);
 vars.GDH_BRIDGE_EXPIRES_AT=new Date(Date.now()-1).toISOString();assert.equal((await c.handleGdhBridge(req(key,payload),'/bridge/send',url)).status,503);assert.equal(sent,1);
-assert.ok(!source.includes("path === '/test-searches'"));assert.equal((source.match(/allowedMailboxes\)\w*=\w*\.in\('mailbox_owner',allowedMailboxes\)/g)||[]).length,2);
+assert.ok(!source.includes("path === '/test-searches'"));assert.equal((source.match(/allowedMailboxes\)\w*=\w*\.in\('mailbox_owner',allowedMailboxes\)/g)||[]).length,3);
 console.log('PASS: disabled/expired/invalid key denied; two-mailbox reads; sender/provider/recipient scope; unrelated routes denied; obsolete key bypass removed.');
