@@ -231,7 +231,7 @@ async function syncGmail() {
     });
     if (error) throw new Error(`Gmail message storage failed: ${error.message}`);
   }
-  const { data: latestStored } = await db.from('communication_messages').select('received_at').eq('provider', 'gmail').order('received_at', {
+  const { data: latestStored } = await db.from('communication_messages').select('received_at').eq('provider', 'gmail').eq('mailbox_owner', mailbox).order('received_at', {
     ascending: false
   }).limit(1).maybeSingle();
   const newest = latestStored?.received_at ?? sync?.last_message_at ?? null;

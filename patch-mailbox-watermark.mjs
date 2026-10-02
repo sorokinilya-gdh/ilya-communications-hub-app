@@ -1,0 +1,2 @@
+import fs from 'node:fs';const file='supabase/functions/hub/index.ts';let s=fs.readFileSync(file,'utf8');const old="select('received_at').eq('provider', 'gmail').order('received_at',";
+if(!s.includes(old))throw Error('Missing Gmail watermark query');s=s.replace(old,"select('received_at').eq('provider', 'gmail').eq('mailbox_owner', mailbox).order('received_at',");fs.writeFileSync(file,s);console.log('Gmail incremental watermark isolated to the current mailbox.');
