@@ -1,0 +1,7 @@
+import fs from 'node:fs';const path='supabase/functions/hub/index.ts';let s=fs.readFileSync(path,'utf8');function patch(a,b){if(!s.includes(a))throw Error('Missing recent-sync patch anchor');s=s.replace(a,b)}
+patch('async function syncGmail() {','async function syncGmail(recentOnly = false) {');
+patch("const syncProvider = 'gmail:' + (mailbox || gmailRecord.organization_name || gmailRecord.provider);","const syncProvider = 'gmail:' + (mailbox || gmailRecord.organization_name || gmailRecord.provider) + (recentOnly ? ':recent' : '');");
+patch("maxResults: '250',","maxResults: recentOnly ? '50' : '250',");
+patch("else if (sync?.initial_import_complete && sync.last_message_at) params.set('q', `after:${Math.floor(new Date(sync.last_message_at).getTime() / 1000)}`);","else if (sync?.initial_import_complete && sync.last_message_at) params.set('q', `after:${Math.floor(new Date(sync.last_message_at).getTime() / 1000) - 1}`);\n  else if (recentOnly) params.set('q', 'newer_than:1d');");
+patch("if (path === '/sync/gmail' && request.method === 'POST') return response(200, await syncGmail());","if (path === '/sync/gmail/recent' && request.method === 'POST') return response(200, await syncGmail(true));\n    if (path === '/sync/gmail' && request.method === 'POST') return response(200, await syncGmail());");
+fs.writeFileSync(path,s);console.log('Recent Gmail sync uses independent cursors and a one-second overlap.');

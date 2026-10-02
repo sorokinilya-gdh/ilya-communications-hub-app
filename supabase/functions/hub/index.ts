@@ -150,7 +150,7 @@ async function gmailAccessToken(recordOverride = null) {
     mailbox: record.organization_name
   };
 }
-async function syncGmail() {
+async function syncGmail(recentOnly = false) {
   const db = admin();
   const { data: gmailRecords, error: gmailRecordsError } = await db.from('communication_integrations').select('*').or('provider.eq.gmail,provider.like.gmail:%');
   if (gmailRecordsError) throw gmailRecordsError;
@@ -160,14 +160,15 @@ async function syncGmail() {
   const mailboxResults = [];
   for (const gmailRecord of gmailRecords) {
     const { accessToken, mailbox } = await gmailAccessToken(gmailRecord);
-    const syncProvider = 'gmail:' + (mailbox || gmailRecord.organization_name || gmailRecord.provider);
+    const syncProvider = 'gmail:' + (mailbox || gmailRecord.organization_name || gmailRecord.provider) + (recentOnly ? ':recent' : '');
     const { data: sync } = await db.from('communication_sync_state').select('*').eq('provider', syncProvider).maybeSingle();
   const params = new URLSearchParams({
-    maxResults: '250',
+    maxResults: recentOnly ? '50' : '250',
     includeSpamTrash: 'true'
   });
   if (sync?.history_cursor) params.set('pageToken', sync.history_cursor);
-  else if (sync?.initial_import_complete && sync.last_message_at) params.set('q', `after:${Math.floor(new Date(sync.last_message_at).getTime() / 1000)}`);
+  else if (sync?.initial_import_complete && sync.last_message_at) params.set('q', `after:${Math.floor(new Date(sync.last_message_at).getTime() / 1000) - 1}`);
+  else if (recentOnly) params.set('q', 'newer_than:1d');
   const authorization = {
     Authorization: `Bearer ${accessToken}`
   };
@@ -716,6 +717,7 @@ Deno.serve(async (request)=>{
       }
       return response(200, { reset: (rows ?? []).map((row)=>row.provider) });
     }
+    if (path === '/sync/gmail/recent' && request.method === 'POST') return response(200, await syncGmail(true));
     if (path === '/sync/gmail' && request.method === 'POST') return response(200, await syncGmail());
     if (path === '/sync/zoho' && request.method === 'POST') return response(200, await syncZoho());
     const match = path.match(/^\/integrations\/(gmail|zoho)\/(status|auth-url|callback)$/);
