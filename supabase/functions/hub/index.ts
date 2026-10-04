@@ -821,6 +821,7 @@ Deno.serve(async (request)=>{
   });
   try {
     if(path.startsWith('/bridge/'))return await handleGdhBridge(request,path,url);
+    if(path==='/auth/request-code'&&request.method==='POST')return await requestPchCode20261004(request);
     const unauthorized = await requireIlya(request);
     if (unauthorized) return unauthorized;
     if(path==='/folders/delete-batch'&&request.method==='POST')return response(200,await deleteFolderBatch(await request.json()));
@@ -1008,3 +1009,21 @@ Deno.serve(async (request)=>{
     });
   }
 });
+
+function pchCodeRequestAllowed20261004(origin,email){return origin==='https://sorokinilya-gdh.github.io'&&String(email||'').trim().toLowerCase()==='sorokin.ilya@gmail.com'}
+async function requestPchCode20261004(request){
+ const owner='sorokin.ilya@gmail.com';let payload;try{payload=await request.json()}catch{return response(400,{error:'Invalid sign-in request'})}
+ if(!pchCodeRequestAllowed20261004(request.headers.get('origin'),payload.email))return response(403,{error:'This sign-in request is not allowed'});
+ const db=admin(),now=Date.now(),key='pch-auth-code',stamp=new Date(now).toISOString(),cutoff=new Date(now-60000).toISOString();
+ const inserted=await db.from('pch_auth_code_requests').upsert({provider:key,updated_at:'1970-01-01T00:00:00.000Z',history_cursor:'[]'},{onConflict:'provider',ignoreDuplicates:true});if(inserted.error)return response(503,{error:'Sign-in delivery is temporarily unavailable'});
+ const state=await db.from('pch_auth_code_requests').select('updated_at,history_cursor').eq('provider',key).single();if(state.error)return response(503,{error:'Sign-in delivery is temporarily unavailable'});
+ let times=[];try{times=JSON.parse(state.data.history_cursor||'[]').filter(x=>Number(x)>now-3600000)}catch{}
+ if(times.length>=10)return response(429,{error:'Too many code requests. Try later; no replacement code was sent'});
+ const claimed=await db.from('pch_auth_code_requests').update({updated_at:stamp,history_cursor:JSON.stringify([...times,now])}).eq('provider',key).eq('updated_at',state.data.updated_at).lt('updated_at',cutoff).select('provider');if(claimed.error)return response(503,{error:'Sign-in delivery is temporarily unavailable'});if(!claimed.data?.length)return response(429,{error:'Wait at least one minute before requesting another code'});
+ try{
+ const users=await db.auth.admin.listUsers({page:1,perPage:1000});if(users.error||!users.data.users.some(u=>u.email?.toLowerCase()===owner))throw Error('Approved user unavailable');
+ const generated=await db.auth.admin.generateLink({type:'magiclink',email:owner});const code=generated.data?.properties?.email_otp;if(generated.error||!/^\d{8}$/.test(code||''))throw Error('Sign-in generation unavailable');
+ await sendGmail({from:owner,to:[owner],subject:'Your PCH sign-in code',body:'Enter this eight-digit code in Ilya Communications Hub:\n\n'+code+'\n\nKeep the hub open in the same browser. No sign-in link is required. If you did not request this code, ignore this email.'});
+ return response(200,{sent:true,codeLength:8,retryAfter:60});
+ }catch{return response(503,{error:'The sign-in code could not be delivered. No automatic replacement request will be made'})}
+}
