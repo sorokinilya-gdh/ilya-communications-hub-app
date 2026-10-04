@@ -1,0 +1,17 @@
+
+function HubPersistentSync20261004({gmail,zoho,gmailStatus,zohoStatus,mailboxes,total}){
+F.useEffect(()=>{let alive=true;const states={gmail:{timer:null,busy:false,failures:0,loaded:false},zoho:{timer:null,busy:false,failures:0,loaded:false}};
+async function run(provider){const st=states[provider];if(!alive||st.busy)return;st.busy=true;let delay=60000;
+try{if(!navigator.onLine)throw Error('Offline');const info=(await Un.get('/api/integrations/'+provider+'/status')).data;if(!alive)return;(provider==='gmail'?gmailStatus:zohoStatus)(info);if(!info.connected)throw Error(provider+' needs authorization');
+const synced=(await Un.post(provider==='gmail'?'/sync/gmail/recent':'/api/integrations/zoho/sync',{})).data;if(!alive)return;
+let offset=0,rows=[],count=0,boxes=[];do{const page=(await Un.get('/messages?provider='+provider+'&limit=500&offset='+offset)).data;if(!alive)return;rows.push(...(page.messages||[]));count=page.total||rows.length;boxes=page.mailboxes||boxes;offset+=500;if(st.loaded||!(page.messages||[]).length)break;}while(offset<count);
+const update=provider==='gmail'?gmail:zoho;update(previous=>{if(!st.loaded)return rows;const ids=new Set(rows.map(x=>x.id));return [...rows,...previous.filter(x=>!ids.has(x.id))].sort((a,b)=>new Date(b.time)-new Date(a.time))});
+st.loaded=true;st.failures=0;if(provider==='gmail')total(count);else mailboxes([...new Set([...boxes.map(x=>x.email||x.emailAddress||x.address),...rows.map(x=>x.mailboxOwner)].filter(Boolean))]);delay=synced.hasMore?3000:60000;
+window.dispatchEvent(new CustomEvent('hub-sync-health',{detail:{provider,ok:true,at:Date.now()}}));
+}catch(e){st.failures++;delay=Math.min(120000,5000*2**Math.min(st.failures-1,5));window.dispatchEvent(new CustomEvent('hub-sync-health',{detail:{provider,ok:false,error:String(e.message||e),delay}}))}
+finally{st.busy=false;if(alive)st.timer=setTimeout(()=>run(provider),delay)}}
+function wake(){if(!alive||!navigator.onLine)return;for(const p of Object.keys(states)){clearTimeout(states[p].timer);run(p)}}
+window.addEventListener('online',wake);const visible=()=>{if(document.visibilityState==='visible')wake()};document.addEventListener('visibilitychange',visible);
+wake();return()=>{alive=false;for(const x of Object.values(states))clearTimeout(x.timer);window.removeEventListener('online',wake);document.removeEventListener('visibilitychange',visible)}
+},[]);
+}

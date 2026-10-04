@@ -1,0 +1,8 @@
+
+.mail-layout{grid-template-columns:minmax(0,1fr)!important}.mail-layout .reader{display:none}.mail-layout:has(.message.active){grid-template-columns:minmax(550px,58%) minmax(0,42%)!important}.mail-layout:has(.message.active) .reader{display:block}
+.messages .message,.compact-columns{display:grid!important;grid-template-columns:minmax(120px,19%) minmax(130px,20%) minmax(100px,1fr) 75px 100px;align-items:center;gap:10px}
+.messages .message{height:36px!important;min-height:36px!important;padding:0 12px!important;border-radius:0!important;border-bottom:1px solid #dce2e5!important;margin:0!important;text-align:left}
+.messages .message>span,.messages .message>time{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px!important}
+.messages .message .sender,.messages .message .subject{display:block!important}.message-to{color:#58666c}.compact-actions{display:flex!important;align-items:center;justify-content:flex-end;gap:2px}.compact-actions>span{width:23px!important;height:26px!important;padding:0!important;font-size:15px!important}
+.compact-columns{position:sticky;top:0;z-index:3;background:#edf1f4;padding:8px 12px;font-size:12px;font-weight:700;border-bottom:1px solid #cbd3d9}.messages .inbox-pagination{padding:5px 12px!important;position:static!important;font-size:12px}
+@media(max-width:800px){.mail-layout:has(.message.active){display:block!important}.mail-layout:has(.message.active) .message-list{display:none}.messages .message,.compact-columns{grid-template-columns:110px 120px minmax(100px,1fr) 60px 90px;gap:6px}.messages{overflow-x:auto!important}.messages .message,.compact-columns{min-width:600px}}

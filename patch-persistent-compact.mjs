@@ -1,0 +1,10 @@
+import fs from 'node:fs';
+const old='assets/index-ContactIntelligenceWatch20261002.js',next='assets/index-PersistentCompact20261004.js';let s=fs.readFileSync(old,'utf8');
+const start=s.indexOf('Gs.slice('),a=s.indexOf('children:[m.jsxs("div",{className:"message-row"',start),b=s.indexOf(']},S.id))',a);if(a<0||b<0)throw Error('Row anchors');const row=s.slice(a,b);let acts=row.slice(row.indexOf('m.jsxs("span",{role:"checkbox"'),row.indexOf(']}),m.jsx("p"')).replace('S.priority?"☑":"☐"," Important"','S.priority?"★":"☆"').replace('children:"Spam"','children:"⊘"');
+s=s.slice(0,a)+'children:[m.jsx("span",{className:S.unread?"sender unread":"sender",title:S.email,children:S.sender}),m.jsx("span",{className:"message-to",title:S.toAddress||S.originalRecipient||S.mailboxOwner,children:S.toAddress||S.originalRecipient||S.mailboxOwner}),m.jsx("span",{className:S.unread?"subject unread":"subject",title:S.subject,children:S.subject}),m.jsx("time",{children:nd(S.time)}),m.jsxs("span",{className:"compact-actions",children:['+acts+']})'+s.slice(b);
+s=s.replace('className:"messages",children:[','className:"messages",children:[m.jsxs("div",{className:"compact-columns",children:["From","To","Subject","Date","Actions"].map(x=>m.jsx("span",{children:x},x))}),');
+const x=s.indexOf('try{const Jt=(await Un.get("/api/integrations/zoho/status")).data;Re(Jt)',s.indexOf('async function ve(){')),y=s.indexOf('}}ve()},[]);',x);if(x<0||y<0)throw Error('Sync anchors');s=s.slice(0,x)+s.slice(y+1);
+s=s.replace('const hubStartupRef=F.useRef(false);','HubPersistentSync20261004({gmail:Q,zoho:Ht,gmailStatus:Ee,zohoStatus:Re,mailboxes:Bn,total:setGTotal});const hubStartupRef=F.useRef(false);');
+s+=fs.readFileSync('persistent-sync-helper.txt','utf8');fs.writeFileSync(next,s);
+fs.writeFileSync('assets/index-PersistentCompact20261004.css',fs.readFileSync('assets/index-MailboxCounts20260929.css','utf8')+fs.readFileSync('compact-list.css','utf8'));
+fs.writeFileSync('index.html',fs.readFileSync('index.html','utf8').replace(old,next).replace('index-MailboxCounts20260929.css','index-PersistentCompact20261004.css'));
