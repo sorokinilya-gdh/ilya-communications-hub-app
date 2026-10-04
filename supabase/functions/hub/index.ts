@@ -821,6 +821,7 @@ Deno.serve(async (request)=>{
   });
   try {
     if(path.startsWith('/bridge/'))return await handleGdhBridge(request,path,url);
+    if(path==='/auth/code-health'&&request.method==='GET'){if(request.headers.get('origin')!=='https://sorokinilya-gdh.github.io')return response(403,{error:'Forbidden'});const test=await admin().from('pch_auth_code_requests').select('provider').limit(1);return response(test.error?503:200,{ready:!test.error});}
     if(path==='/auth/request-code'&&request.method==='POST')return await requestPchCode20261004(request);
     const unauthorized = await requireIlya(request);
     if (unauthorized) return unauthorized;
