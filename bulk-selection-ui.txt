@@ -1,0 +1,18 @@
+
+function HubPageRows20261004(rows,page,size){const n=[25,50,100].includes(Number(size))?Number(size):100,p=Math.max(1,Math.min(Number(page)||1,Math.max(1,Math.ceil(rows.length/n))));return rows.slice((p-1)*n,p*n)}
+function HubTogglePage20261004(previous,rows,checked){const next=new Set(previous);for(const row of rows)checked?next.add(row.id):next.delete(row.id);return next}
+async function HubRunSelected20261004(rows,action,folder,onProgress){
+ const succeeded=[],failed=[];let next=0;async function worker(){for(;;){const i=next++;if(i>=rows.length)return;const row=rows[i];try{
+ if(action==='trash'&&folder==='trash'){const{data}=await Un.post('/folders/delete-batch',{folder:'trash',ids:[row.id]});if(!data.deleted?.includes(row.id))throw Error(data.failed?.map(x=>x.error).join('; ')||'Message unavailable or no longer in Trash');}
+ else if(action==='important'||action==='not-important')await Un.post('/message/importance',{id:row.id,important:action==='important'});
+ else if(action==='restore'&&folder==='spam')await Un.post('/message/not-spam',{id:row.id});
+ else{if(action==='archive-important')await Un.post('/message/importance',{id:row.id,important:true});await Un.post('/message/action',{id:row.id,provider:row.provider.toLowerCase(),providerId:row.providerId||row.id.split(':').at(-1),mailbox:row.mailboxOwner,action:action==='archive-important'?'archive':action,sender:row.email,subject:row.subject});}
+ succeeded.push(row.id);
+ }catch(e){failed.push({id:row.id,error:String(e.message||e)})}onProgress?.(succeeded.length+failed.length,rows.length)}}
+ await Promise.all(Array.from({length:Math.min(3,rows.length)},()=>worker()));return{succeeded,failed};
+}
+function HubSelectionBar20261004({rows,pageRows,selected,setSelected,pageSize,setPageSize,busy,onAction,folder}){
+ const input=F.useRef(null),all=pageRows.length>0&&pageRows.every(x=>selected.has(x.id)),some=pageRows.some(x=>selected.has(x.id));F.useEffect(()=>{if(input.current)input.current.indeterminate=some&&!all},[some,all]);
+ const actions=folder==='trash'?[['trash','Delete selected'],['restore','Restore selected']]:folder==='spam'?[['trash','Delete selected'],['restore','Not Spam']]:[['trash','Delete selected'],['archive','Archive'],['archive-important','Archive Important'],['spam','Spam'],['important','Mark Important'],['not-important','Not Important']];
+ return m.jsxs('div',{className:'bulk-selection-bar',children:[m.jsx('input',{ref:input,type:'checkbox','aria-label':'Select all emails on this page',checked:all,disabled:busy||!pageRows.length,onChange:e=>setSelected(old=>HubTogglePage20261004(old,pageRows,e.target.checked))}),m.jsx('span',{children:selected.size+' selected'}),...actions.map(([value,label])=>m.jsx('button',{disabled:busy||!selected.size,onClick:()=>onAction(value),children:label},value)),selected.size>0&&m.jsx('button',{disabled:busy,onClick:()=>setSelected(new Set()),children:'Clear selection'}),m.jsxs('label',{children:['Per page ',m.jsx('select',{'aria-label':'Messages per page',disabled:busy,value:pageSize,onChange:e=>setPageSize(Number(e.target.value)),children:[25,50,100].map(n=>m.jsx('option',{value:n,children:n},n))})]})]});
+}
