@@ -1,0 +1,1 @@
+import fs from 'node:fs';const p='assets/index-SessionRecovery20261004.js';let s=fs.readFileSync(p,'utf8');const a='((j,A)=>{if(active){r(A);c(!1)}})';const b='((j,A)=>{if(active&&(A||j==="SIGNED_OUT")){r(A);c(!1)}})';if(!s.includes(a))throw Error('Missing auth callback');s=s.replace(a,b);fs.writeFileSync(p,s);console.log('Auth callback preserves pending recovery state');
