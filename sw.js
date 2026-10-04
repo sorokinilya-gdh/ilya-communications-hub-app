@@ -1,4 +1,4 @@
-const CACHE = 'communications-hub-session-recovery-20261004';
+const CACHE = 'communications-hub-archive-cache-20261004';
 const BASE = '/ilya-communications-hub-app';
 const SHELL = [`${BASE}/`, `${BASE}/manifest.webmanifest`, `${BASE}/hub-icon.svg`, `${BASE}/hub-icon-180.png`, `${BASE}/hub-icon-512.png`];
 

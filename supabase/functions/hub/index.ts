@@ -609,6 +609,7 @@ async function listMessages(url, allowedMailboxes=null) {
   else if (!allFolders) query = provider === 'gmail' ? query.contains('provider_labels', [
     'INBOX'
   ]) : provider ? query : query.or('provider.neq.gmail,provider_labels.cs.{INBOX}');
+  if (folder === 'archive' && url.searchParams.get('importantOnly') === 'true') query = query.eq('important', true);
   if (activeZoho) query = query.in('mailbox_owner', activeZoho);
   const { data, error, count } = await query;
   if (error) throw error;
