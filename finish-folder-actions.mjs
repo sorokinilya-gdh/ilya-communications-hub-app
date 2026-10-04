@@ -1,0 +1,8 @@
+
+import fs from 'node:fs';const p='C:/Users/Ilya/Documents/GitHub/ilya-hub-backend/supabase/functions/hub/index.ts';let s=fs.readFileSync(p,'utf8');
+s=s.replace("scope: 'ZohoMail.accounts.READ,ZohoMail.organization.accounts.READ,ZohoMail.messages.ALL',","scope: 'ZohoMail.accounts.READ,ZohoMail.organization.accounts.READ,ZohoMail.messages.ALL'+(url.searchParams.get('folderAccess')==='true'?',ZohoMail.folders.READ':''),");
+s=s.replace("const target=folders.find(x=>String(x.folderType||x.folderName||x.name||'').toLowerCase()===folder","const target=folders.find(x=>String(x.folderType||x.folderName||x.name||'').toLowerCase()===folder");
+s=s.replace("await db.from('communication_messages').update({raw_metadata:{...(row.raw_metadata||{}),hubFolder:action==='trash'?'trash':action==='archive'?'archive':action==='spam'?'spam':'inbox'},updated_at:","await db.from('communication_messages').update({...(provider==='gmail'?{provider_labels:action==='trash'?['TRASH']:action==='spam'?['SPAM']:action==='archive'?[]:['INBOX']}:{}),raw_metadata:{...(row.raw_metadata||{}),hubFolder:action==='trash'?'trash':action==='archive'?'archive':action==='spam'?'spam':'inbox'},updated_at:");
+fs.writeFileSync(p,s);fs.writeFileSync('supabase/functions/hub/index.ts',s);
+let ui=fs.readFileSync('assets/index-FolderPages20261004.js','utf8');ui=ui.replace("let alive=true;setNotice('Loading…');Un.get('/messages?folder='","let alive=true;Un.get('/messages?folder='").replace("setTotal(data.total||0);setNotice('');if(page>1","setTotal(data.total||0);if(page>1");fs.writeFileSync('assets/index-FolderPages20261004.js',ui);
+console.log('Provider permission paths and folder status updates installed');

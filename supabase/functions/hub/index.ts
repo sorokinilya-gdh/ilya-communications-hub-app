@@ -744,7 +744,7 @@ async function sendZoho(payload) {
  throw new Error(rejected||'Zoho sender is not connected');
 }
 
-async function executeMessageAction(payload){ const provider=String(payload.provider||'').toLowerCase(),action=String(payload.action||'').toLowerCase(); if(!['trash','restore','spam','archive','important'].includes(action))return response(400,{error:'Unsupported action'}); if(action==='important'){providerActionId(payload);await learnImportance(payload);const db=admin(),id=String(payload.id||'');if(id){const {data:row}=await db.from('communication_messages').select('raw_metadata').eq('id',id).maybeSingle();if(row)await db.from('communication_messages').update({important:true,raw_metadata:{...(row.raw_metadata||{}),importanceSource:'manual'},updated_at:new Date().toISOString()}).eq('id',id)}return response(200,{ok:true,action:'important'});} const result=provider==='gmail'?(action==='spam'?await spamGmail(payload):action==='archive'?await archiveGmail(payload):await mutateGmail(payload,action)):provider==='zoho'?await mutateZoho(payload,action):null; if(action==='spam'){await learnSpam(payload);if(payload.sender)await savePersonalPreference({scope:'sender',key:payload.sender,spam:true});} if(!result)return response(400,{error:'Unsupported provider'}); const db=admin(); const id=String(payload.id||''); if(id){const {data:row}=await db.from('communication_messages').select('raw_metadata').eq('id',id).maybeSingle(); if(row)await db.from('communication_messages').update({raw_metadata:{...(row.raw_metadata||{}),hubFolder:action==='trash'?'trash':action==='archive'?'archive':action==='spam'?'spam':'inbox'},updated_at:new Date().toISOString()}).eq('id',id)} return response(200,result); }
+async function executeMessageAction(payload){ const provider=String(payload.provider||'').toLowerCase(),action=String(payload.action||'').toLowerCase(); if(!['trash','restore','spam','archive','important'].includes(action))return response(400,{error:'Unsupported action'}); if(action==='important'){providerActionId(payload);await learnImportance(payload);const db=admin(),id=String(payload.id||'');if(id){const {data:row}=await db.from('communication_messages').select('raw_metadata,provider_labels').eq('id',id).maybeSingle();if(row)await db.from('communication_messages').update({important:true,raw_metadata:{...(row.raw_metadata||{}),importanceSource:'manual'},updated_at:new Date().toISOString()}).eq('id',id)}return response(200,{ok:true,action:'important'});} const result=provider==='gmail'?(action==='spam'?await spamGmail(payload):action==='archive'?await archiveGmail(payload):await mutateGmail(payload,action)):provider==='zoho'?await mutateZoho(payload,action):null; if(action==='spam'){await learnSpam(payload);if(payload.sender)await savePersonalPreference({scope:'sender',key:payload.sender,spam:true});} if(!result)return response(400,{error:'Unsupported provider'}); const db=admin(); const id=String(payload.id||''); if(id){const {data:row}=await db.from('communication_messages').select('raw_metadata,provider_labels').eq('id',id).maybeSingle(); if(row)await db.from('communication_messages').update({...(provider==='gmail'?{provider_labels:[...(row.provider_labels||[]).filter(x=>!['TRASH','SPAM','INBOX'].includes(x)),...(action==='trash'?['TRASH']:action==='spam'?['SPAM']:action==='archive'?[]:['INBOX'])]}:{}),raw_metadata:{...(row.raw_metadata||{}),hubFolder:action==='trash'?'trash':action==='archive'?'archive':action==='spam'?'spam':'inbox'},updated_at:new Date().toISOString()}).eq('id',id)} return response(200,result); }
 const gdhOwnerId='63502126-9db1-469f-99ce-b62ba27fcc0a';
 async function listExecutiveAttention(includeClosed=false){let query=admin().from('communication_executive_attention').select('*').eq('source_owner_id',gdhOwnerId).order('updated_at',{ascending:false}).limit(500);if(!includeClosed)query=query.in('status',['needs_attention','opened']);const {data,error}=await query;if(error)throw error;return{items:data||[]};}
 async function publishExecutiveAttention(payload){
@@ -780,6 +780,38 @@ async function handleGdhBridge(request,path,url) {
  return response(404,{error:'Bridge operation unavailable.'});
 }
 
+
+async function folderContexts(folder){
+ const {data:records,error}=await admin().from('communication_integrations').select('*');if(error)throw error;const out=[],seen=new Set();
+ for(const record of records||[]){const provider=String(record.provider).split(':')[0],mailbox=record.organization_name;if(!['gmail','zoho'].includes(provider))continue;
+ if(provider==='gmail'){const {accessToken}=await gmailAccessToken(record);if(seen.has('gmail:'+mailbox))continue;seen.add('gmail:'+mailbox);out.push({provider,mailbox,headers:{Authorization:'Bearer '+accessToken},folder});}
+ else{const r=await fetch('https://accounts.zoho.com/oauth/v2/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'refresh_token',client_id:env('ZOHO_CLIENT_ID'),client_secret:env('ZOHO_CLIENT_SECRET'),refresh_token:decryptToken(record)})});const token=await r.json();if(!r.ok||!token.access_token)throw Error('Zoho token refresh failed');const headers={Authorization:'Zoho-oauthtoken '+token.access_token};const a=await fetch('https://mail.zoho.com/api/accounts',{headers});if(!a.ok)throw Error('Zoho account list failed');for(const account of extractAccountRecords(await a.json())){const accountId=field(account,'accountId','accountID'),email=field(account,'primaryEmailAddress','mailboxAddress','mailId');if(seen.has('zoho:'+accountId))continue;seen.add('zoho:'+accountId);const f=await fetch('https://mail.zoho.com/api/accounts/'+accountId+'/folders',{headers});if(!f.ok)throw Error('Zoho folder list failed');const folders=extractAccountRecords(await f.json());const target=folders.find(x=>String(x.folderType||x.folderName||x.name||'').toLowerCase()===folder||String(x.folderName||x.name||'').toLowerCase()===(folder==='trash'?'trash':'spam'));if(target)out.push({provider,mailbox:email,accountId,folderId:field(target,'folderId','folderID'),headers,folder});}}
+ }return out;
+}
+async function liveFolderItems(ctx,limit=100,start=0){
+ const url=ctx.provider==='gmail'?'https://gmail.googleapis.com/gmail/v1/users/me/messages?labelIds='+ctx.folder.toUpperCase()+'&includeSpamTrash=true&maxResults='+limit:'https://mail.zoho.com/api/accounts/'+ctx.accountId+'/messages/view?folderId='+ctx.folderId+'&limit='+limit+'&start='+(start+1);
+ const r=await fetch(url,{headers:ctx.headers});if(!r.ok)throw Error(ctx.provider+' folder listing failed: '+r.status);const data=await r.json();return ctx.provider==='gmail'?(data.messages||[]):extractAccountRecords(data);
+}
+async function purgeFolderMessage(ctx,item){
+ const providerId=ctx.provider==='gmail'?item.id:field(item,'messageId','messageID'),id=ctx.provider==='gmail'?'gmail:'+providerId:'zoho:'+ctx.accountId+':'+providerId;
+ const url=ctx.provider==='gmail'?'https://gmail.googleapis.com/gmail/v1/users/me/messages/'+encodeURIComponent(providerId):'https://mail.zoho.com/api/accounts/'+ctx.accountId+'/folders/'+ctx.folderId+'/messages/'+providerId+'?expunge=true';
+ const r=await fetch(url,{method:'DELETE',headers:ctx.headers});if(!r.ok&&r.status!==404){if(ctx.provider==='gmail'&&r.status===403)throw Error('Gmail permanent deletion requires authorization. Use Enable Gmail permanent deletion.');throw Error(ctx.provider+' permanent deletion failed: '+r.status)}
+ if(ctx.provider==='zoho'&&r.status!==404){const result=await r.json().catch(()=>({}));if(result.status?.code&&Number(result.status.code)!==200)throw Error('Zoho permanent deletion failed: '+result.status.code)}
+ const saved=await admin().from('communication_messages').delete().eq('id',id).eq('mailbox_owner',ctx.mailbox);if(saved.error)throw saved.error;return id;
+}
+async function deleteFolderBatch(payload){
+ const folder=String(payload.folder||'').toLowerCase();if(!['trash','spam'].includes(folder))throw Error('Only Trash and Spam support permanent folder deletion');
+ const ids=payload.ids===undefined?null:payload.ids;if(ids!==null&&(!Array.isArray(ids)||ids.length>100||ids.some(x=>typeof x!=='string')))throw Error('Select up to 100 message IDs');
+ if(ids&&ids.length===0)return{deleted:[],failed:[],done:true};
+ const contexts=await folderContexts(folder),deleted=[],failed=[],remaining=new Set(ids||[]);let processed=0,more=false;
+ for(const ctx of contexts){if(processed>=20){more=true;break}try{
+ if(ids===null){const items=await liveFolderItems(ctx,20);for(const item of items){if(processed>=20){more=true;break}try{deleted.push(await purgeFolderMessage(ctx,item));processed++}catch(e){failed.push({mailbox:ctx.mailbox,error:String(e.message||e)});break}}if(items.length===20)more=true;}
+ else{if(ctx.provider==='gmail'){for(const id of [...remaining]){if(processed>=20){more=true;break}if(!id.startsWith('gmail:'))continue;const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+encodeURIComponent(id.slice(6))+'?format=metadata',{headers:ctx.headers});if(r.status===404)continue;if(!r.ok)throw Error('Gmail message validation failed');const item=await r.json();if(!item.labelIds?.includes(folder.toUpperCase()))continue;deleted.push(await purgeFolderMessage(ctx,item));remaining.delete(id);processed++;}}
+ else{const matches=[];for(let start=0;start<100000&&remaining.size&&matches.length<20-processed;start+=100){const items=await liveFolderItems(ctx,100,start);for(const item of items){const id='zoho:'+ctx.accountId+':'+field(item,'messageId','messageID');if(remaining.has(id)){matches.push(item);if(matches.length>=20-processed)break}}if(items.length<100)break}for(const item of matches){const id=await purgeFolderMessage(ctx,item);deleted.push(id);remaining.delete(id);processed++}}}
+ }catch(e){failed.push({mailbox:ctx.mailbox,error:String(e.message||e)})}}
+ return{deleted,failed,remaining:ids?[...remaining]:undefined,done:failed.length>0||(!more&&(!ids||remaining.size===0))||deleted.length===0};
+}
+
 Deno.serve(async (request)=>{
   const url = new URL(request.url);
   const path = url.pathname.replace(/^.*\/(?:functions\/v1\/)?hub(?=\/|$)/, '') || '/';
@@ -790,6 +822,7 @@ Deno.serve(async (request)=>{
     if(path.startsWith('/bridge/'))return await handleGdhBridge(request,path,url);
     const unauthorized = await requireIlya(request);
     if (unauthorized) return unauthorized;
+    if(path==='/folders/delete-batch'&&request.method==='POST')return response(200,await deleteFolderBatch(await request.json()));
     if (path === '/health') return response(200, {
       message: 'Success',
       platform: 'supabase-edge'
@@ -849,7 +882,7 @@ Deno.serve(async (request)=>{
         access_type: 'offline',
         prompt: 'consent',
         include_granted_scopes: 'true',
-        scope: 'openid email https://www.googleapis.com/auth/gmail.modify'+(url.searchParams.get('contacts')==='true'?' https://www.googleapis.com/auth/contacts.readonly':''),
+        scope: 'openid email '+(url.searchParams.get('permanentDelete')==='true'?'https://mail.google.com/':'https://www.googleapis.com/auth/gmail.modify')+(url.searchParams.get('contacts')==='true'?' https://www.googleapis.com/auth/contacts.readonly':''),
         state: state()
       }) : new URLSearchParams({
         client_id: env('ZOHO_CLIENT_ID'),
@@ -857,7 +890,7 @@ Deno.serve(async (request)=>{
         response_type: 'code',
         access_type: 'offline',
         prompt: 'consent',
-        scope: 'ZohoMail.accounts.READ,ZohoMail.organization.accounts.READ,ZohoMail.messages.ALL',
+        scope: 'ZohoMail.accounts.READ,ZohoMail.organization.accounts.READ,ZohoMail.messages.ALL'+(url.searchParams.get('folderAccess')==='true'?',ZohoMail.folders.READ':''),
         access_type: 'offline',
         prompt: 'consent',
         state: state()
