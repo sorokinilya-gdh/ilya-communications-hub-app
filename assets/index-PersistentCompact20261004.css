@@ -31,6 +31,8 @@
 
 .mailbox-expand-toggle{margin-left:auto;margin-right:5px;font-size:17px;line-height:1;color:#8f741f;cursor:pointer}.nav-item b+.mailbox-expand-toggle{margin-left:4px}
 
+.archive-choice-wrap,.reader-archive-wrap{position:relative;display:inline-flex;align-items:center;overflow:visible}.archive-destination-menu{display:none;position:absolute;top:100%;right:0;z-index:1200;min-width:112px;padding:4px;background:white;border:1px solid #d8dfdf;border-radius:7px}.archive-destination-menu.open{display:flex;flex-direction:column}.archive-destination-menu button{display:block;width:100%;border:0;background:transparent;text-align:left;padding:7px 10px;border-radius:5px;font:inherit;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap}.archive-destination-menu button:hover{background:#edf5f2}.reader-archive-wrap>.archive-destination-menu{left:0;right:auto}
+
 .mail-layout{grid-template-columns:minmax(0,1fr)!important}.mail-layout .reader{display:none}.mail-layout.reader-open{grid-template-columns:minmax(550px,58%) minmax(0,42%)!important}.mail-layout.reader-open .reader{display:block}
 .messages .message,.compact-columns{display:grid!important;grid-template-columns:minmax(120px,19%) minmax(130px,20%) minmax(100px,1fr) 75px 100px;align-items:center;gap:10px}
 .messages .message{height:36px!important;min-height:36px!important;padding:0 12px!important;border-radius:0!important;border-bottom:1px solid #dce2e5!important;margin:0!important;text-align:left}
