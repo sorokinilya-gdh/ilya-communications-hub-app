@@ -44,3 +44,5 @@
 .connection-health{display:flex;gap:18px;padding:4px 14px;background:#eef4f1;color:#305b4c;font-size:11px}.messages .message.active{background:#e1eaf0!important}
 
 .list-header{padding:8px 14px!important}.list-header h1{font-size:20px!important}.list-header .eyebrow{display:none}.mail-controls{padding:5px 12px!important}.connection-health+.notice{font-size:11px;padding:4px 12px}
+
+.messages .message{overflow:visible!important}.messages .message>.compact-actions{overflow:visible!important}.compact-actions .archive-choice-wrap{overflow:visible!important;position:relative}.compact-actions .archive-destination-menu{white-space:normal;z-index:30}.mail-layout{height:calc(100vh - 92px)!important}.message-list,.reader{height:100%!important;max-height:100%!important}
