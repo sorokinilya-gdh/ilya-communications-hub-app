@@ -105,7 +105,7 @@ function displayIdentity(row){
  if(marker>=0){const block=body.slice(marker,marker+2000),from=block.match(/(?:^|\n)\s*From:\s*([^\r\n]+)/i),to=block.match(/(?:^|\n)\s*To:\s*([^\r\n]+)/i);
  if(from){const parsed=address(from[1].trim());if(/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(parsed.email)){name=parsed.name;email=parsed.email;if(to)recipient=to[1].trim()}}
  }
- return {name:name||email||'Unknown sender',email,recipient};
+ return {name:name||email||'Unknown sender',email,recipient:decodeMailEntities(recipient)};
 }
 
 function uiMessage(row) {
@@ -132,7 +132,7 @@ function uiMessage(row) {
     toAddress: identity.recipient,
     mailboxOwner: row.mailbox_owner,
     sendAsAuthorized: true,
-    folder: row.raw_metadata?.hubFolder || (row.provider_labels?.includes('TRASH')?'trash':row.provider_labels?.includes('SPAM')?'spam':null) || (row.provider_labels?.includes('INBOX') ? 'inbox' : row.provider === 'gmail' ? 'archive' : 'inbox')
+    folder: row.hub_folder || row.raw_metadata?.hubFolder || (row.provider_labels?.includes('TRASH')?'trash':row.provider_labels?.includes('SPAM')?'spam':null) || (row.provider_labels?.includes('INBOX') ? 'inbox' : row.provider === 'gmail' ? 'archive' : 'inbox')
   };
 }
 async function integration(provider) {
