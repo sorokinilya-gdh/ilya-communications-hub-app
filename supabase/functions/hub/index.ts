@@ -404,9 +404,11 @@ async function syncZoho() {
   const { data: sync } = await db.from('communication_sync_state').select('*').eq('provider', 'zoho').maybeSingle();
   let cursors = {};
   let previouslyAuthorized = new Set();
+  let nextAccount=0;
   try {
     const saved = JSON.parse(sync?.history_cursor || '{}');
     if (saved && typeof saved === 'object' && !Array.isArray(saved)) {
+      nextAccount=Number(saved.nextAccount)||0;
       cursors = saved.cursors && typeof saved.cursors === 'object' ? saved.cursors : saved;
       previouslyAuthorized = new Set(saved.authorizedMailboxes || []);
     }
@@ -416,7 +418,9 @@ async function syncZoho() {
   const rows = [];
   const mailboxResults = [];
   const failures = [];
-  for (const account of accounts.values()){
+  const authorizedAccounts=[...accounts.values()].filter(account=>accessById.has(field(account,'accountId','accountID')));
+  nextAccount=authorizedAccounts.length?nextAccount%authorizedAccounts.length:0;const accountBatch=authorizedAccounts.slice(nextAccount,nextAccount+2);nextAccount=authorizedAccounts.length?(nextAccount+accountBatch.length)%authorizedAccounts.length:0;
+  for (const account of accountBatch){
     const accountId = field(account, 'accountId', 'accountID');
     if (!accountId) continue;
     const mailbox = field(account, 'primaryEmailAddress', 'mailboxAddress', 'mailId') || 'Zoho';
@@ -431,7 +435,7 @@ async function syncZoho() {
       });
       continue;
     }
-    const result = await fetch(`https://mail.zoho.com/api/accounts/${encodeURIComponent(accountId)}/messages/view?start=${start}&limit=200&sortBy=date&sortorder=false&includeto=true`, {
+    const result = await fetch(`https://mail.zoho.com/api/accounts/${encodeURIComponent(accountId)}/messages/view?start=${start}&limit=100&sortBy=date&sortorder=false&includeto=true`, {
       headers: mailboxHeaders
     });
     if (!result.ok) {
@@ -454,16 +458,8 @@ async function syncZoho() {
       continue;
     }
     const page = extractAccountRecords(payload);
-    const ids=page.map(message=>'zoho:'+accountId+':'+field(message,'messageId','messageID')).filter(Boolean);
-    const {data:stored,error:storedError}=await db.from('communication_messages').select('id,raw_metadata').in('id',ids);
-    if(storedError)throw storedError;
-    const metadataById=new Map((stored||[]).map(row=>[row.id,row.raw_metadata||{}]));
-    const bodies=new Map((stored||[]).filter(row=>row.raw_metadata?.html||row.raw_metadata?.bodyHydrated).map(row=>[row.id,row.raw_metadata]));
-    for(let batch=0;batch<page.length;batch+=12){await Promise.all(page.slice(batch,batch+12).map(async message=>{
-      const providerId=field(message,'messageId','messageID'),id='zoho:'+accountId+':'+providerId;if(!providerId||bodies.has(id))return;
-      try{const detail=await fetch('https://mail.zoho.com/api/accounts/'+encodeURIComponent(accountId)+'/folders/'+encodeURIComponent(field(message,'folderId','folderID'))+'/messages/'+encodeURIComponent(providerId)+'/content?includeBlockContent=true',{headers:mailboxHeaders});if(detail.ok){const json=await detail.json(),content=json?.data||json,html=field(content,'content','htmlContent')||'',body=html||field(content,'plainText','textContent');if(body)bodies.set(id,{body,html,bodyHydrated:true})}}catch{}
-    }))}
-    cursors[accountId] = savedCursor < 0 ? -1 : page.length === 200 ? start + 200 : -1;
+    const metadataById=new Map(),bodies=new Map();
+    cursors[accountId] = savedCursor < 0 ? -1 : page.length === 100 ? start + 100 : -1;
     mailboxResults.push({
       mailbox,
       imported: page.length,
@@ -511,10 +507,10 @@ async function syncZoho() {
   }
   if (rows.length) {
     await applyLearnedRules(rows);
-    await persistMessageRows(rows, 'Zoho');
+    const saved=await db.rpc('pch_upsert_zoho_metadata',{p_rows:rows});if(saved.error)throw saved.error;
   }
   const newest = rows.map((row)=>row.received_at).sort().at(-1) ?? sync?.last_message_at ?? null;
-  const hasMore = Object.values(cursors).some((cursor)=>cursor > 1);
+  const hasMore = nextAccount!==0||authorizedAccounts.some(account=>Number(cursors[field(account,'accountId','accountID')])>1);
   const warnings = [
     ...discoveryErrors,
     ...failures
@@ -523,7 +519,7 @@ async function syncZoho() {
   const { error: stateError } = await db.from('communication_sync_state').upsert({
     provider: 'zoho',
     history_cursor: JSON.stringify({
-      cursors,
+      cursors,nextAccount,
       organizationMailboxes: [
         ...accounts.values()
       ].map((account)=>field(account, 'primaryEmailAddress', 'mailboxAddress', 'mailId')).filter(Boolean),
