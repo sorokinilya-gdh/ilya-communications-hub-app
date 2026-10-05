@@ -1,4 +1,4 @@
-const CACHE = 'communications-hub-reader-two-lines-20261005';
+const CACHE = 'communications-hub-stable-reader-20261005';
 const BASE = '/ilya-communications-hub-app';
 const SHELL = [`${BASE}/`, `${BASE}/manifest.webmanifest`, `${BASE}/hub-icon.svg`, `${BASE}/hub-icon-180.png`, `${BASE}/hub-icon-512.png`];
 
