@@ -1,0 +1,12 @@
+import fs from 'node:fs';
+let s=fs.readFileSync('assets/index-StableReader20261005.js','utf8');const anchor="className:'hub-envelope',children:[m.jsx('span',{className:'hub-from'";
+if(!s.includes(anchor))throw Error('Envelope anchor missing');
+s=s.replace(anchor,"className:'hub-envelope',children:[m.jsx('time',{className:'hub-date',dateTime:td(message.time)?new Date(td(message.time)).toISOString():undefined,title:nd(message.time),children:nd(message.time)}),m.jsx('span',{className:'hub-from'");
+fs.writeFileSync('assets/index-DatedStableReader20261005.js',s);
+let css=fs.readFileSync('assets/index-StableReader20261005.css','utf8')+'\n.hub-envelope>.hub-date{display:block!important;flex:0 0 auto;font-size:12px!important;white-space:nowrap;color:#58666c}.hub-envelope{gap:8px}.hub-envelope>.hub-mailbox{flex:1.15}\n';
+fs.writeFileSync('assets/index-DatedStableReader20261005.css',css);
+fs.writeFileSync('index.html',fs.readFileSync('index.html','utf8').replaceAll('index-StableReader20261005','index-DatedStableReader20261005'));
+fs.writeFileSync('sw.js',fs.readFileSync('sw.js','utf8').replace('communications-hub-stable-reader-20261005','communications-hub-dated-stable-reader-20261005'));
+let test=fs.readFileSync('test-stable-reader-20261005.mjs','utf8').replaceAll('index-StableReader20261005','index-DatedStableReader20261005');
+test=test.replace("assert.equal(await page.locator('.folder-row:not(.folder-head)').count(),100);","assert.equal(await page.locator('.folder-row:not(.folder-head)').count(),100);assert.equal(await page.locator('.hub-envelope').first().evaluate(e=>e.firstElementChild.className),'hub-date');const date=await page.locator('.hub-date').first().innerText();assert(/2026/.test(date)&&/\\d+:\\d{2}/.test(date),'Date and time visible');");
+fs.writeFileSync('test-dated-stable-reader-20261005.mjs',test);console.log('Date/time is first envelope item');
