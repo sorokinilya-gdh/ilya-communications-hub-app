@@ -55,6 +55,6 @@ css+=`
 @media(max-width:650px){.folder-pages.folder-reader-open{grid-template-columns:minmax(0,1fr)}.folder-pages.folder-reader-open> :not(.folder-reader){display:none}.folder-pages .folder-reader{grid-column:1;grid-row:1;height:calc(100vh - 92px)}.hub-envelope{gap:5px;font-size:11px}}
 `;
 fs.writeFileSync('assets/index-ReaderTwoLines20261005.css',css);
-let h=fs.readFileSync('index.html','utf8').replace('index-OnDemandMailbox20261005.js','index-ReaderTwoLines20261005.js').replace('index-PersistentCompact20261004.css','index-ReaderTwoLines20261005.css');fs.writeFileSync('index.html',h);fs.writeFileSync('404.html',h);
+let h=fs.readFileSync('index.html','utf8').replace('index-OnDemandMailbox20261005.js','index-ReaderTwoLines20261005.js').replace('index-PersistentCompact20261004.css','index-ReaderTwoLines20261005.css');fs.writeFileSync('index.html',h);
 fs.writeFileSync('sw.js',fs.readFileSync('sw.js','utf8').replace('communications-hub-code-delivery-20261004','communications-hub-reader-two-lines-20261005'));
 console.log('Patched reader and both email lists');
