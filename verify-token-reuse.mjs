@@ -1,0 +1,14 @@
+import fs from 'node:fs';import assert from 'node:assert/strict';import {createHash,randomBytes,createCipheriv,createDecipheriv} from 'node:crypto';
+const source=fs.readFileSync('C:/Users/Ilya/Documents/GitHub/ilya-hub-backend/supabase/functions/hub/index.ts','utf8');
+const crypt=source.slice(source.indexOf('function encryptToken('),source.indexOf('function address('));
+const helper=source.slice(source.indexOf('async function pchZohoTokenFetch20261005('));
+let row=null,lease=false,calls=0;const db={from(){return{select(){return{eq(){return{async maybeSingle(){return{data:row,error:null}}}}}},update(value){return{async eq(){row={...row,...value};return{error:null}}}}}},async rpc(){if(lease)return{data:false,error:null};lease=true;return{data:true,error:null}}};
+const factory=new Function('admin','env','createHash','randomBytes','createCipheriv','createDecipheriv','Buffer','fetch',crypt+helper+';return pchZohoTokenFetch20261005;');
+const request=factory(()=>db,()=> 'synthetic-test-encryption-key',createHash,randomBytes,createCipheriv,createDecipheriv,Buffer,async()=>{calls++;await new Promise(r=>setTimeout(r,10));return new Response(JSON.stringify({access_token:'synthetic-test-token',expires_in:3600}),{status:200})});
+const options={method:'POST',body:new URLSearchParams({grant_type:'refresh_token',client_id:'test',refresh_token:'synthetic-refresh'})};
+const responses=await Promise.all([request('https://accounts.zoho.com/oauth/v2/token',options),request('https://accounts.zoho.com/oauth/v2/token',options)]);
+assert.equal(calls,1);for(const response of responses)assert.equal((await response.json()).access_token,'synthetic-test-token');
+assert.ok(!JSON.stringify(row.encrypted_payload).includes('synthetic-test-token'));
+assert.equal((await(await request('https://accounts.zoho.com/oauth/v2/token',options)).json()).access_token,'synthetic-test-token');assert.equal(calls,1);
+await request('https://accounts.zoho.com/oauth/v2/token',{method:'POST',body:new URLSearchParams({grant_type:'authorization_code',code:'synthetic-code'})});assert.equal(calls,2);
+console.log('PASS: concurrent refresh coalesces; valid token reused; cache encrypted; authorization-code exchange unchanged.');
