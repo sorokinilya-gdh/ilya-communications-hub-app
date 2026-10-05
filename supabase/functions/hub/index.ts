@@ -611,7 +611,7 @@ async function listMessages(url, allowedMailboxes=null) {
   const counts = new Map();
   for (const row of mailboxRows ?? [])counts.set(row.mailbox_owner, (counts.get(row.mailbox_owner) ?? 0) + 1);
   return {
-    messages: await (async()=>{const knowledge=await contactKnowledge();return(data||[]).map(row=>{const d=classifyPersonalMessage(row,knowledge);return uiMessage({...row,important:d.important,raw_metadata:{...(row.raw_metadata||{}),knownContact:d.knownContact,classificationReason:d.reason}})})})(),
+    messages: await (async()=>{const knowledge=await contactKnowledge();return(data||[]).map(row=>{const d=classifyPersonalMessage(row,knowledge);return {...uiMessage({...row,important:d.important,raw_metadata:{...(row.raw_metadata||{}),knownContact:d.knownContact,classificationReason:d.reason}}),body:row.preview,html:'',bodyHydrated:false}})})(),
     total: count ?? 0,
     mailboxes: [
       ...counts
