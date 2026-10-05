@@ -571,19 +571,6 @@ async function loadFullMessage(id,allowedMailboxes=null){
 async function listMessages(url, allowedMailboxes=null) {
   const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 200), 1), 500);
   const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
-  let activeZoho = null;
-  if (url.searchParams.get('provider') === 'zoho') {
-    const { data: state } = await admin().from('communication_sync_state').select('history_cursor').eq('provider', 'zoho').maybeSingle();
-    try {
-      const saved = JSON.parse(state?.history_cursor || '{}');
-      if (Array.isArray(saved.organizationMailboxes)) activeZoho = saved.organizationMailboxes;
-    } catch  {}
-    if (activeZoho && !activeZoho.length) return {
-      messages: [],
-      total: 0,
-      mailboxes: []
-    };
-  }
   let query = admin().from('communication_messages').select('*', {
     count: 'exact'
   }).order('received_at', {
@@ -610,7 +597,7 @@ async function listMessages(url, allowedMailboxes=null) {
     'INBOX'
   ]) : provider ? query : query.or('provider.neq.gmail,provider_labels.cs.{INBOX}');
   if (folder === 'archive' && url.searchParams.get('importantOnly') === 'true') query = query.eq('important', true);
-  if (activeZoho) query = query.in('mailbox_owner', activeZoho);
+
   const { data, error, count } = await query;
   if (error) throw error;
   let mailboxQuery = admin().from('communication_messages').select('mailbox_owner');
@@ -619,7 +606,7 @@ async function listMessages(url, allowedMailboxes=null) {
   mailboxQuery = provider === 'gmail' ? mailboxQuery.contains('provider_labels', [
     'INBOX'
   ]) : provider ? mailboxQuery : mailboxQuery.or('provider.neq.gmail,provider_labels.cs.{INBOX}');
-  if (activeZoho) mailboxQuery = mailboxQuery.in('mailbox_owner', activeZoho);
+
   const { data: mailboxRows } = await mailboxQuery;
   const counts = new Map();
   for (const row of mailboxRows ?? [])counts.set(row.mailbox_owner, (counts.get(row.mailbox_owner) ?? 0) + 1);
