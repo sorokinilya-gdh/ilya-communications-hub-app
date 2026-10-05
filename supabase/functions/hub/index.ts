@@ -590,7 +590,8 @@ async function listMessages(url, allowedMailboxes=null) {
       query = query.or(`sender_name.ilike.%${token}%,sender_email.ilike.%${token}%,subject.ilike.%${token}%,preview.ilike.%${token}%,mailbox_owner.ilike.%${token}%`);
     }
   }
-  if(folder==='archive') query=query.or('and(provider.eq.gmail,provider_labels.not.cs.{INBOX},provider_labels.not.cs.{TRASH},provider_labels.not.cs.{SPAM}),and(provider.eq.zoho,hub_folder.eq.archive)');
+  if(folder==='inbox') query=query.or('provider.neq.gmail,provider_labels.cs.{INBOX}');
+  else if(folder==='archive') query=query.or('and(provider.eq.gmail,provider_labels.not.cs.{INBOX},provider_labels.not.cs.{TRASH},provider_labels.not.cs.{SPAM}),and(provider.eq.zoho,hub_folder.eq.archive)');
   else if(folder==='spam')query=query.or('provider_labels.cs.{SPAM},hub_folder.eq.spam');
   else if(folder==='trash')query=query.or('provider_labels.cs.{TRASH},hub_folder.eq.trash');
   else if (!allFolders) query = provider === 'gmail' ? query.contains('provider_labels', [
