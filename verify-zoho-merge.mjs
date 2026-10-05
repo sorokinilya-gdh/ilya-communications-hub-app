@@ -5,8 +5,11 @@ BEGIN
  payload=jsonb_build_array(jsonb_build_object('id',fixture,'provider','zoho','mailbox_owner','synthetic@example.invalid','sender_name','Synthetic Test','sender_email','synthetic@example.invalid','recipients',jsonb_build_array('synthetic@example.invalid'),'subject','Synthetic metadata fixture','preview','Synthetic preview','received_at',now(),'unread',true,'important',false,'provider_labels',jsonb_build_array(),'raw_metadata',jsonb_build_object('providerId','fixture'),'updated_at',now()));
  PERFORM public.pch_upsert_zoho_metadata(payload);
  UPDATE public.communication_messages SET important=true,raw_metadata=raw_metadata||jsonb_build_object('body','synthetic-cached-body','html','synthetic-cached-html','bodyHydrated',true,'importanceSource','manual','hubFolder','archive') WHERE id=fixture;
- PERFORM public.pch_upsert_zoho_metadata(payload||'[]'::jsonb);
+ payload=jsonb_set(payload,'{0,preview}',to_jsonb('Changed synthetic preview'::text));
+ payload=jsonb_set(payload,'{0,raw_metadata}',jsonb_build_object('providerId','fixture','newTestKey','synthetic-new-metadata','body','must-not-replace-body','html','must-not-replace-html'));
+ PERFORM public.pch_upsert_zoho_metadata(payload);
  SELECT raw_metadata,important INTO stored,saved_important FROM public.communication_messages WHERE id=fixture;
+ ASSERT stored->>'newTestKey'='synthetic-new-metadata','New metadata not merged';
  ASSERT stored->>'body'='synthetic-cached-body','Cached body changed';
  ASSERT stored->>'html'='synthetic-cached-html','Cached HTML changed';
  ASSERT stored->>'hubFolder'='archive','Archive folder changed';
