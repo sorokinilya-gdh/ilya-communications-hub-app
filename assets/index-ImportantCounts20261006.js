@@ -420,7 +420,7 @@ function HubImportantCounts20261006(){
    try{const{data}=await Un.get('/messages/counts');if(alive&&request===generation)setCounts(data.important)}catch{}
    finally{busy=false;if(alive&&dirty){clearTimeout(timer);timer=setTimeout(refresh,250)}}
   }
-  function schedule(){generation++;dirty=true;clearTimeout(timer);timer=setTimeout(refresh,250)}
+  function schedule(e){if(busy&&e?.type!=='hub-message-counts-changed')return;if(e?.type==='hub-message-counts-changed')generation++;dirty=true;clearTimeout(timer);timer=setTimeout(refresh,250)}
   function synced(e){if(e.detail?.ok)schedule()}
   function visible(){if(document.visibilityState==='visible')schedule()}
   refresh();const interval=setInterval(()=>{if(document.visibilityState==='visible')schedule()},60000);
