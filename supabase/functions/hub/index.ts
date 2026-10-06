@@ -697,7 +697,7 @@ async function mutateZoho(payload,action){
  if(!['trash','restore','archive','spam'].includes(action))throw new Error('Unsupported Zoho action');
  const {data:records,error}=await db.from('communication_integrations').select('*').or('provider.eq.zoho,provider.like.zoho:%');if(error)throw error;
  const ordered=[...(records||[])].sort((a,b)=>Number(String(b.organization_name||'').toLowerCase()===mailbox)-Number(String(a.organization_name||'').toLowerCase()===mailbox));
- recordsLoop:for(const record of ordered){
+ let rejected='';recordsLoop:for(const record of ordered){
   const refreshed=await pchZohoTokenFetch20261005('https://accounts.zoho.com/oauth/v2/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'refresh_token',client_id:env('ZOHO_CLIENT_ID'),client_secret:env('ZOHO_CLIENT_SECRET'),refresh_token:decryptToken(record)})});const token=await refreshed.json();if(!refreshed.ok||!token.access_token)continue;
   const headers={Authorization:'Zoho-oauthtoken '+token.access_token,'Content-Type':'application/json'},listed=await fetch('https://mail.zoho.com/api/accounts',{headers});if(!listed.ok)continue;
   const account=extractAccountRecords(await listed.json()).find(a=>field(a,'primaryEmailAddress','mailboxAddress','mailId').toLowerCase()===mailbox);if(!account)continue;
@@ -710,9 +710,23 @@ async function mutateZoho(payload,action){
    meta={...meta,folderId,hubRestoreFolderId:folderId};const saved=await db.from('communication_messages').update({raw_metadata:meta}).eq('id',id).eq('mailbox_owner',mailbox);if(saved.error)throw saved.error;
    endpoint='https://mail.zoho.com/api/accounts/'+accountId+'/folders/'+folderId+'/messages/'+messageId+'?expunge=false';method='DELETE';
   }else{const mode=action==='archive'?'archiveMails':action==='spam'?'moveToSpam':meta.hubFolder==='archive'?'unArchiveMails':meta.hubFolder==='spam'?'markNotSpam':'moveMessage';const value={mode,messageId:[messageId]};if(mode==='moveMessage'){const destination=String(meta.hubRestoreFolderId||meta.folderId||'');if(!/^\d+$/.test(destination))throw new Error('Original folder is unavailable; refresh before restoring.');value.destfolderId=destination;}else if(/^\d+$/.test(folderId)){meta={...meta,folderId,hubRestoreFolderId:folderId};const saved=await db.from('communication_messages').update({raw_metadata:meta}).eq('id',id).eq('mailbox_owner',mailbox);if(saved.error)throw saved.error;}body=JSON.stringify(value).replace('"messageId":["'+messageId+'"]','"messageId":['+messageId+']');if(value.destfolderId)body=body.replace('"destfolderId":"'+value.destfolderId+'"','"destfolderId":'+value.destfolderId);}
-  const result=await fetch(endpoint,{method,headers,body}),json=await result.json().catch(()=>({})),status=Number(json.status?.code||result.status);if(status===401||status===403)continue recordsLoop;if(!result.ok||status!==200)throw new Error('Zoho '+action+' failed: '+status);return{ok:true,provider:'zoho',action,id:messageId};
+  const result=await fetch(endpoint,{method,headers,body}),json=await result.json().catch(()=>({})),status=Number(json.status?.code||result.status);if(status===401||status===403){
+ rejected='Zoho rejected '+action+' for '+mailbox+' ('+status+'). '+String(json.data?.errorCode||json.data?.message||json.status?.description||'Reconnect this mailbox with message-write access.');
+ if(action==='trash'){
+  const foldersResponse=await fetch('https://mail.zoho.com/api/accounts/'+accountId+'/folders',{headers}),foldersJson=await foldersResponse.json().catch(()=>({}));
+  if(foldersResponse.ok&&Number(foldersJson.status?.code||foldersResponse.status)===200){
+   const target=extractAccountRecords(foldersJson).find(x=>String(x.folderType||'').toLowerCase()==='trash'||String(x.folderName||x.name||'').toLowerCase()==='trash'),destination=target&&field(target,'folderId','folderID');
+   if(/^\d+$/.test(String(destination||''))){
+    const moveBody='{"mode":"moveMessage","messageId":['+messageId+'],"destfolderId":'+destination+'}';
+    const moved=await fetch('https://mail.zoho.com/api/accounts/'+accountId+'/updatemessage',{method:'PUT',headers,body:moveBody}),moveJson=await moved.json().catch(()=>({}));
+    if(moved.ok&&Number(moveJson.status?.code||moved.status)===200)return{ok:true,provider:'zoho',action,id:messageId,movedToTrash:true};
+   }
+  }
  }
- throw new Error('Zoho mailbox is not connected or lacks message access');
+ continue recordsLoop;
+ }if(!result.ok||status!==200)throw new Error('Zoho '+action+' failed: '+status);return{ok:true,provider:'zoho',action,id:messageId};
+ }
+ throw new Error(rejected||'Zoho mailbox is not connected or lacks message access');
 }
 async function sendGmail(payload) {
   const db=admin(); const {data:records,error}=await db.from('communication_integrations').select('*').or('provider.eq.gmail,provider.like.gmail:%'); if(error)throw error;
