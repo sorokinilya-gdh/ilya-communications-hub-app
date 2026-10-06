@@ -734,7 +734,26 @@ async function sendZoho(payload) {
  throw new Error(rejected||'Zoho sender is not connected');
 }
 
-async function executeMessageAction(payload){ const provider=String(payload.provider||'').toLowerCase(),action=String(payload.action||'').toLowerCase(); if(!['trash','restore','spam','archive','important'].includes(action))return response(400,{error:'Unsupported action'}); if(action==='important'){providerActionId(payload);await learnImportance(payload);const db=admin(),id=String(payload.id||'');if(id){const {data:row}=await db.from('communication_messages').select('raw_metadata,provider_labels').eq('id',id).maybeSingle();if(row)await db.from('communication_messages').update({important:true,raw_metadata:{...(row.raw_metadata||{}),importanceSource:'manual'},updated_at:new Date().toISOString()}).eq('id',id)}return response(200,{ok:true,action:'important'});} const result=provider==='gmail'?(action==='spam'?await spamGmail(payload):action==='archive'?await archiveGmail(payload):await mutateGmail(payload,action)):provider==='zoho'?await mutateZoho(payload,action):null; if(action==='spam'){await learnSpam(payload);if(payload.sender)await savePersonalPreference({scope:'sender',key:payload.sender,spam:true});} if(!result)return response(400,{error:'Unsupported provider'}); const db=admin(); const id=String(payload.id||''); if(id){const {data:row}=await db.from('communication_messages').select('raw_metadata,provider_labels').eq('id',id).maybeSingle(); if(row)await db.from('communication_messages').update({...(provider==='gmail'?{provider_labels:[...(row.provider_labels||[]).filter(x=>!['TRASH','SPAM','INBOX'].includes(x)),...(action==='trash'?['TRASH']:action==='spam'?['SPAM']:action==='archive'?[]:['INBOX'])]}:{}),raw_metadata:{...(row.raw_metadata||{}),hubFolder:action==='trash'?'trash':action==='archive'?'archive':action==='spam'?'spam':'inbox'},updated_at:new Date().toISOString()}).eq('id',id)} return response(200,result); }
+async function executeMessageAction(payload){
+ const provider=String(payload.provider||'').toLowerCase(),action=String(payload.action||'').toLowerCase();
+ if(!['trash','restore','spam','archive','important'].includes(action))return response(400,{error:'Unsupported action'});
+ if(action==='important'){providerActionId(payload);await learnImportance(payload);const db=admin(),id=String(payload.id||'');if(id){const {data:row}=await db.from('communication_messages').select('raw_metadata,provider_labels').eq('id',id).maybeSingle();if(row)await db.from('communication_messages').update({important:true,raw_metadata:{...(row.raw_metadata||{}),importanceSource:'manual'},updated_at:new Date().toISOString()}).eq('id',id)}return response(200,{ok:true,action:'important'});}
+ const db=admin(),id=String(payload.id||'');
+ const stored=await db.from('communication_messages').select('id,provider,mailbox_owner,raw_metadata,provider_labels').eq('id',id).maybeSingle();if(stored.error)throw stored.error;
+ const record=stored.data;if(!record)return response(404,{error:'Email is no longer in the hub. Refresh the mailbox.'});
+ if(record.provider!==provider||String(record.mailbox_owner).toLowerCase()!==String(payload.mailbox||'').toLowerCase())return response(400,{error:'Email mailbox does not match its stored record.'});
+ payload={...payload,provider:record.provider,mailbox:record.mailbox_owner,providerId:record.raw_metadata?.providerId||id.split(':').pop()};
+ const result=provider==='gmail'?(action==='spam'?await spamGmail(payload):action==='archive'?await archiveGmail(payload):await mutateGmail(payload,action)):provider==='zoho'?await mutateZoho(payload,action):null;
+ if(!result?.ok)return response(400,{error:'Mail provider did not confirm the action.'});
+ const latest=await db.from('communication_messages').select('raw_metadata,provider_labels').eq('id',id).maybeSingle();if(latest.error)throw latest.error;if(!latest.data)throw Error('Mail provider changed the email, but its hub record disappeared. Refresh the mailbox.');
+ const folder=action==='trash'?'trash':action==='archive'?'archive':action==='spam'?'spam':'inbox',row=latest.data;
+ const update={...(provider==='gmail'?{provider_labels:[...(row.provider_labels||[]).filter(x=>!['TRASH','SPAM','INBOX'].includes(x)),...(action==='trash'?['TRASH']:action==='spam'?['SPAM']:action==='archive'?[]:['INBOX'])]}:{}),raw_metadata:{...(row.raw_metadata||{}),hubFolder:folder,hubActionAt:new Date().toISOString()},updated_at:new Date().toISOString()};
+ let saved;for(let attempt=0;attempt<2;attempt++){saved=await db.from('communication_messages').update(update).eq('id',id).eq('mailbox_owner',record.mailbox_owner).select('id').maybeSingle();if(!saved.error)break;}
+ if(saved.error||!saved.data)throw Error('The provider changed the email, but the hub could not save the folder change. Click again to complete synchronization.');
+ if(action==='spam'){await learnSpam(payload);if(payload.sender)await savePersonalPreference({scope:'sender',key:payload.sender,spam:true});}
+ return response(200,{...result,hubMessageId:id,folder,indexed:true});
+}
+
 const gdhOwnerId='63502126-9db1-469f-99ce-b62ba27fcc0a';
 async function listExecutiveAttention(includeClosed=false){let query=admin().from('communication_executive_attention').select('*').eq('source_owner_id',gdhOwnerId).order('updated_at',{ascending:false}).limit(500);if(!includeClosed)query=query.in('status',['needs_attention','opened']);const {data,error}=await query;if(error)throw error;return{items:data||[]};}
 async function publishExecutiveAttention(payload){
