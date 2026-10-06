@@ -1083,14 +1083,14 @@ async function pchDownloadOriginal20261005(id){
  throw Error('Original email is unavailable for this mailbox');
 }
 
+
 async function pchImportantCounts20261006(){
- const db=admin(),knowledge=await contactKnowledge();const counts={unread:0,read:0};let last=null;
- for(;;){
-  let query=db.from('pch_compact_messages').select('id,provider,provider_labels,hub_folder,sender_email,subject,preview,important,unread').or('and(provider.eq.gmail,provider_labels.cs.{INBOX}),and(provider.eq.zoho,hub_folder.eq.inbox),and(provider.eq.zoho,hub_folder.is.null)').order('id').limit(1000);
-  if(last!==null)query=query.gt('id',last);
-  const{data,error}=await query;if(error)throw error;
-  for(const row of data||[])if(classifyPersonalMessage(row,knowledge).important)counts[row.unread?'unread':'read']++;
-  if(!data?.length||data.length<1000)break;last=data[data.length-1].id;
+ const db=admin(),knowledge=await contactKnowledge(),counts={unread:0,read:0};
+ async function page(offset,exact=false){
+  const{data,error,count}=await db.from('pch_compact_messages').select('id,sender_email,subject,preview,important,unread',exact?{count:'exact'}:undefined).or('and(provider.eq.gmail,provider_labels.cs.{INBOX}),and(provider.eq.zoho,hub_folder.eq.inbox),and(provider.eq.zoho,hub_folder.is.null)').order('received_at',{ascending:false}).range(offset,offset+499);
+  if(error)throw error;for(const row of data||[])if(classifyPersonalMessage(row,knowledge).important)counts[row.unread?'unread':'read']++;return count;
  }
- return{important:counts};
+ const total=await page(0,true);let next=500;
+ async function worker(){while(next<total){const offset=next;next+=500;await page(offset)}}
+ await Promise.all(Array.from({length:4},worker));return{important:counts};
 }
