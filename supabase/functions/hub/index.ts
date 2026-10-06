@@ -600,7 +600,8 @@ async function listMessages(url, allowedMailboxes=null) {
   ]) : provider ? query : query.or('and(provider.eq.gmail,provider_labels.cs.{INBOX}),and(provider.eq.zoho,hub_folder.eq.inbox),and(provider.eq.zoho,hub_folder.is.null)');
   if (folder === 'archive' && url.searchParams.get('importantOnly') === 'true') query = query.eq('important', true);
 
-  const { data, error, count } = await query;
+  let { data, error, count } = await query;
+  if(error?.code==='PGRST103'){const first=await query.range(0,0);if(first.error)throw first.error;data=[];error=null;count=first.count;}
   if (error) throw error;
   let mailboxQuery = admin().from('pch_compact_messages').select('mailbox_owner');
   if(allowedMailboxes)mailboxQuery=mailboxQuery.in('mailbox_owner',allowedMailboxes);
@@ -737,12 +738,12 @@ async function sendZoho(payload) {
 async function executeMessageAction(payload){
  const provider=String(payload.provider||'').toLowerCase(),action=String(payload.action||'').toLowerCase();
  if(!['trash','restore','spam','archive','important'].includes(action))return response(400,{error:'Unsupported action'});
- if(action==='important'){providerActionId(payload);await learnImportance(payload);const db=admin(),id=String(payload.id||'');if(id){const {data:row}=await db.from('communication_messages').select('raw_metadata,provider_labels').eq('id',id).maybeSingle();if(row)await db.from('communication_messages').update({important:true,raw_metadata:{...(row.raw_metadata||{}),importanceSource:'manual'},updated_at:new Date().toISOString()}).eq('id',id)}return response(200,{ok:true,action:'important'});}
  const db=admin(),id=String(payload.id||'');
  const stored=await db.from('communication_messages').select('id,provider,mailbox_owner,raw_metadata,provider_labels').eq('id',id).maybeSingle();if(stored.error)throw stored.error;
  const record=stored.data;if(!record)return response(404,{error:'Email is no longer in the hub. Refresh the mailbox.'});
  if(record.provider!==provider||String(record.mailbox_owner).toLowerCase()!==String(payload.mailbox||'').toLowerCase())return response(400,{error:'Email mailbox does not match its stored record.'});
  payload={...payload,provider:record.provider,mailbox:record.mailbox_owner,providerId:record.raw_metadata?.providerId||id.split(':').pop()};
+ if(action==='important'){const saved=await db.from('communication_messages').update({important:true,raw_metadata:{...(record.raw_metadata||{}),importanceSource:'manual'},updated_at:new Date().toISOString()}).eq('id',id).eq('mailbox_owner',record.mailbox_owner).select('id').single();if(saved.error)throw saved.error;if(!saved.data)throw Error('Importance change was not saved');await learnImportance(payload);return response(200,{ok:true,action:'important',hubMessageId:id,indexed:true});}
  const result=provider==='gmail'?(action==='spam'?await spamGmail(payload):action==='archive'?await archiveGmail(payload):await mutateGmail(payload,action)):provider==='zoho'?await mutateZoho(payload,action):null;
  if(!result?.ok)return response(400,{error:'Mail provider did not confirm the action.'});
  const latest=await db.from('communication_messages').select('raw_metadata,provider_labels').eq('id',id).maybeSingle();if(latest.error)throw latest.error;if(!latest.data)throw Error('Mail provider changed the email, but its hub record disappeared. Refresh the mailbox.');
@@ -777,6 +778,7 @@ async function handleGdhBridge(request,path,url) {
  if(path==='/bridge/message/action'&&request.method==='POST'){const payload=await request.json();const mailbox=String(payload.mailbox||'').toLowerCase(),provider=String(payload.provider||'').toLowerCase();if(!bridgeMailboxes.includes(mailbox)||(mailbox==='ceo@aimicrotec.com'&&provider!=='gmail')||(mailbox==='is@gdh.ltd'&&provider!=='zoho'))return response(403,{error:'Message action mailbox is outside the authorized bridge scope.'});const stored=await admin().from('communication_messages').select('mailbox_owner,provider').eq('id',String(payload.id||'')).maybeSingle();if(stored.error)throw stored.error;if(stored.data&&(String(stored.data.mailbox_owner||'').toLowerCase()!==mailbox||stored.data.provider!==provider))return response(403,{error:'Message record is outside bridge scope.'});return await executeMessageAction({...payload,mailbox,provider});}
  if(path==='/bridge/attention'&&request.method==='GET')return response(200,await listExecutiveAttention(url.searchParams.get('all')==='true'));
  if(path==='/bridge/attention'&&request.method==='POST')return await publishExecutiveAttention(await request.json());
+ if(path==='/bridge/message/download'&&request.method==='GET'){const id=url.searchParams.get('id')||'';const found=await admin().from('communication_messages').select('id').eq('id',id).in('mailbox_owner',bridgeMailboxes).maybeSingle();if(found.error)throw found.error;if(!found.data)return response(404,{error:'Message not found'});return response(200,await pchDownloadOriginal20261005(id));}
  if(path==='/bridge/message/content'&&request.method==='GET')return await loadFullMessage(url.searchParams.get('id')||'',bridgeMailboxes);
  if((path==='/bridge/messages'||path==='/bridge/search')&&request.method==='GET')return response(200,await listMessages(url,bridgeMailboxes));
  if(path==='/bridge/send'&&request.method==='POST'){
@@ -858,6 +860,7 @@ Deno.serve(async (request)=>{
     if(path==='/executive-attention/action'&&request.method==='POST')return await resolveExecutiveAttention(await request.json());
     if(path==='/message/content'&&request.method==='GET')return await loadFullMessage(url.searchParams.get('id')||'');
     if(path==='/message/download'&&request.method==='GET')return response(200,await pchDownloadOriginal20261005(url.searchParams.get('id')||''));
+    if (path === '/messages/counts') return response(200,await pchImportantCounts20261006());
     if (path === '/messages') return response(200, await listMessages(url));
     if (path === '/search') return response(200, await listMessages(url));
     if(path==='/message/action'&&request.method==='POST')return await executeMessageAction(await request.json());
@@ -1078,4 +1081,16 @@ async function pchDownloadOriginal20261005(id){
  if(row.provider==='gmail'){const record=(listed.data||[]).find(x=>String(x.provider).startsWith('gmail')&&String(x.organization_name).toLowerCase()===mailbox);if(!record)throw Error('Gmail mailbox not connected');const{accessToken}=await gmailAccessToken(record);const r=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+encodeURIComponent(messageId)+'?format=raw',{headers:{Authorization:'Bearer '+accessToken}});const data=await r.json();if(!r.ok||!data.raw)throw Error('Original Gmail email unavailable: '+r.status);return{rawBase64:data.raw};}
  if(row.provider==='zoho'){for(const record of (listed.data||[]).filter(x=>String(x.provider).startsWith('zoho'))){const refresh=await pchZohoTokenFetch20261005('https://accounts.zoho.com/oauth/v2/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'refresh_token',client_id:env('ZOHO_CLIENT_ID'),client_secret:env('ZOHO_CLIENT_SECRET'),refresh_token:decryptToken(record)})});const token=await refresh.json();if(!refresh.ok||!token.access_token)continue;const headers={Authorization:'Zoho-oauthtoken '+token.access_token},a=await fetch('https://mail.zoho.com/api/accounts',{headers});if(!a.ok)continue;const account=extractAccountRecords(await a.json()).find(x=>field(x,'primaryEmailAddress','mailboxAddress','mailId').toLowerCase()===mailbox);if(!account)continue;const r=await fetch('https://mail.zoho.com/api/accounts/'+field(account,'accountId','accountID')+'/messages/'+encodeURIComponent(messageId)+'/originalmessage',{headers});const data=await r.json();if(!r.ok||Number(data.status?.code||r.status)!==200||typeof data.data?.content!=='string')throw Error('Original Zoho email unavailable: '+r.status);return{rawBase64:Buffer.from(data.data.content,'utf8').toString('base64')};}}
  throw Error('Original email is unavailable for this mailbox');
+}
+
+async function pchImportantCounts20261006(){
+ const db=admin(),knowledge=await contactKnowledge();const counts={unread:0,read:0};let last=null;
+ for(;;){
+  let query=db.from('pch_compact_messages').select('id,provider,provider_labels,hub_folder,sender_email,subject,preview,important,unread').or('and(provider.eq.gmail,provider_labels.cs.{INBOX}),and(provider.eq.zoho,hub_folder.eq.inbox),and(provider.eq.zoho,hub_folder.is.null)').order('id').limit(1000);
+  if(last!==null)query=query.gt('id',last);
+  const{data,error}=await query;if(error)throw error;
+  for(const row of data||[])if(classifyPersonalMessage(row,knowledge).important)counts[row.unread?'unread':'read']++;
+  if(!data?.length||data.length<1000)break;last=data[data.length-1].id;
+ }
+ return{important:counts};
 }
