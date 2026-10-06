@@ -1,7 +1,7 @@
 
 import fs from 'node:fs';import http from 'node:http';import assert from 'node:assert/strict';import {createRequire} from 'node:module';
 const require=createRequire(import.meta.url),{chromium}=require('C:/Users/Ilya/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules/playwright');
-let js=fs.readFileSync(new URL('./pch-important-bundle-20261006.js',import.meta.url),'utf8');
+let js=fs.readFileSync(new URL('./assets/index-ImportantCounts20261006.js',import.meta.url),'utf8');
 js=js.replace('"serviceWorker"in navigator&&window.addEventListener','false&&window.addEventListener');
 const original='m.jsx(F.StrictMode,{children:m.jsx(R1,{children:m.jsx(C1,{})})})';
 assert(js.includes(original));js=js.replace(original,'m.jsx(CountHarness,{})');
