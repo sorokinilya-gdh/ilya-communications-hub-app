@@ -334,7 +334,7 @@ function HubGoogleContacts20261002({onImported}){const[accounts,setAccounts]=F.u
 function HubPersistentSync20261004({gmail,zoho,gmailStatus,zohoStatus,mailboxes,total,zohoTotal}){
 F.useEffect(()=>{let alive=true;const states={gmail:{timer:null,busy:false,failures:0,loaded:false},zoho:{timer:null,busy:false,failures:0,loaded:false}};
 
-async function run(provider){const st=states[provider];if(!alive||st.busy||document.visibilityState!=='visible')return;st.busy=true;let delay=900000;
+async function run(provider){const st=states[provider];if(!alive||st.busy||document.visibilityState!=='visible')return;const leaseKey='pch:provider-sync-lease:'+provider;try{const lease=Number(localStorage.getItem(leaseKey)||0);if(lease&&Date.now()-lease<900000){st.lastRun=lease;st.timer=setTimeout(()=>run(provider),Math.max(60000,900000-(Date.now()-lease)));return}localStorage.setItem(leaseKey,String(Date.now()))}catch{}st.busy=true;let delay=900000;
 try{if(!navigator.onLine)throw Error('Offline');const info=(await Un.get('/api/integrations/'+provider+'/status')).data;if(!alive)return;(provider==='gmail'?gmailStatus:zohoStatus)(info);
 
 let offset=0,rows=[],count=0,boxes=[];do{const page=(await Un.get('/messages?provider='+provider+'&limit=100&offset='+offset)).data;if(!alive)return;rows.push(...(page.messages||[]));count=page.total||rows.length;boxes=page.mailboxes||boxes;if(!st.loaded){const partial=rows.slice();(provider==='gmail'?gmail:zoho)(previous=>HubMergeRows20261004(previous,partial));if(provider==='gmail')total(count);else zohoTotal(count)}offset+=100;break;}while(offset<count);
