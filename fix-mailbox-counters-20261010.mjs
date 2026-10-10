@@ -1,0 +1,20 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const root='C:/Users/Ilya/Documents/GitHub/ilya-communications-hub-recovered/site';
+const old=fs.readFileSync(root+'/assets/index-Copy20261006.js','utf8');
+let s=old;
+function replace(a,b){assert.equal(s.split(a).length-1,1,'Missing or ambiguous: '+a.slice(0,100));s=s.replace(a,b)}
+const anchor='const st=F.useMemo(()=>[...new Set(';
+const insert=`const [serverMailboxCounts,setServerMailboxCounts]=F.useState(new Map()),mailboxCountEpoch=F.useRef(0);
+ F.useEffect(()=>{let active=true;let timer;let sequence=0;async function refresh(){const seq=++sequence;const emails=[...new Set([...qt,...E,...te?.email?[te.email]:[],...it.map(x=>x.mailboxOwner||x.originalRecipient).filter(Boolean)])].filter(x=>!removedMailboxes.has(x));if(!emails.length)return;const results=await Promise.all(emails.map(async email=>{try{const {data}=await Un.get('/messages?folder=inbox&limit=1&offset=0&mailbox='+encodeURIComponent(email));return[email,Number(data.total||0)]}catch{return[email,null]}}));if(!active||seq!==sequence)return;setServerMailboxCounts(previous=>{const next=new Map(previous);for(const [email,count] of results)if(count!==null)next.set(email,count);return next})}function onCount(event){const detail=event.detail||{};if(detail.mailbox&&Number.isFinite(detail.total)){setServerMailboxCounts(previous=>new Map(previous).set(detail.mailbox,detail.total))}else refresh()}refresh();timer=setInterval(refresh,60000);window.addEventListener('hub-mailbox-count',onCount);window.addEventListener('hub-sync-health',refresh);return()=>{active=false;clearInterval(timer);window.removeEventListener('hub-mailbox-count',onCount);window.removeEventListener('hub-sync-health',refresh)}},[qt,E,te?.email,removedMailboxes]);
+ `;
+replace(anchor,insert+anchor);
+replace('children:iu.get(re)??0','children:serverMailboxCounts.get(re)??iu.get(re)??0');
+replace("function publishCount(value){if(folder==='inbox')window.dispatchEvent(new CustomEvent('hub-inbox-count',!mailbox&&!search.trim()?{detail:{total:value}}:{}))}","function publishCount(value){if(folder==='inbox'){window.dispatchEvent(new CustomEvent('hub-inbox-count',!mailbox&&!search.trim()?{detail:{total:value}}:{}));window.dispatchEvent(new CustomEvent('hub-mailbox-count',{detail:mailbox&&!search.trim()?{mailbox,total:value}:{}}))}}");
+const refresh='setVersion(x=>x+1);setNotice(restore?';
+replace(refresh,"setVersion(x=>x+1);setNotice(restore?");
+fs.writeFileSync(root+'/assets/index-MailboxCounters20261010.js',s);
+const html=fs.readFileSync(root+'/index.html','utf8');
+assert(html.includes('index-Copy20261006.js'));
+fs.writeFileSync(root+'/index.html',html.replace('index-Copy20261006.js','index-MailboxCounters20261010.js'));
+console.log('Counter patch created, size',s.length);
