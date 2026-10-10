@@ -194,7 +194,7 @@ async function syncGmail(recentOnly = false) {
     includeSpamTrash: 'true'
   });
   let savedCursor=null;try{savedCursor=JSON.parse(sync?.history_cursor||'null')}catch{}
-  if(recentOnly){params.set('maxResults','20');params.set('q','after:'+String(Math.floor((Date.now()-86400000)/1000)))}
+  if(recentOnly){params.set('maxResults','50');params.set('q','after:'+String(Math.floor((Date.now()-86400000)/1000)))}
   else if(sync?.history_cursor){params.set('pageToken',savedCursor?.pageToken||sync.history_cursor);if(savedCursor?.query)params.set('q',savedCursor.query)}
   else if(sync?.initial_import_complete&&sync.last_message_at)params.set('q','after:'+String(Math.floor(new Date(sync.last_message_at).getTime()/1000)-1));
   const authorization = {
@@ -441,7 +441,7 @@ async function syncZoho() {
       });
       continue;
     }
-    const result = await fetch(`https://mail.zoho.com/api/accounts/${encodeURIComponent(accountId)}/messages/view?start=${start}&limit=20&sortBy=date&sortorder=false&includeto=true`, {
+    const result = await fetch(`https://mail.zoho.com/api/accounts/${encodeURIComponent(accountId)}/messages/view?start=${start}&limit=50&sortBy=date&sortorder=false&includeto=true`, {
       headers: mailboxHeaders
     });
     if (!result.ok) {
