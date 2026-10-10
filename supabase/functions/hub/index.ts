@@ -728,15 +728,28 @@ async function mutateZoho(payload,action){
  }
  throw new Error(rejected||'Zoho mailbox is not connected or lacks message access');
 }
+function validatedOutgoingAttachments(payload){
+ const items=payload.attachments||[];if(!Array.isArray(items)||items.length>20)throw Error('Maximum 20 attachments');
+ let size=0;return items.map(item=>{const name=String(item.name||'attachment').replace(/[\r\n"\\]/g,'_').slice(0,160),type=/^[\w.+-]+\/[\w.+-]+$/.test(item.type||'')?item.type:'application/octet-stream',data=String(item.data||'').replace(/\s/g,'');
+ if(!/^[A-Za-z0-9+/]*={0,2}$/.test(data))throw Error('Invalid attachment encoding');size+=Math.floor(data.length*3/4);if(size>20*1024*1024)throw Error('Combined attachment limit is 20 MB');return{name,type,data}})}
+function makeOutgoingMime(payload,attachments){
+ const boundary='pch_'+crypto.randomUUID().replace(/-/g,''),subject=String(payload.subject||'').replace(/[\r\n]/g,' ');
+ const headers=['From: '+payload.from,'To: '+payload.to.join(', '),'Subject: =?UTF-8?B?'+Buffer.from(subject).toString('base64')+'?=','MIME-Version: 1.0'];
+ if(!attachments.length)return [...headers,'Content-Type: text/plain; charset=UTF-8','',payload.body].join('\r\n');
+ const lines=[...headers,'Content-Type: multipart/mixed; boundary="'+boundary+'"','','--'+boundary,'Content-Type: text/plain; charset=UTF-8','',''+payload.body];
+ for(const item of attachments){lines.push('--'+boundary,'Content-Type: '+item.type+'; name="'+item.name+'"','Content-Disposition: attachment; filename="'+item.name+'"','Content-Transfer-Encoding: base64','',item.data.replace(/.{1,76}/g,'async function sendGmail(payload) {\r\n'))}
+ lines.push('--'+boundary+'--','');return lines.join('\r\n')
+}
 async function sendGmail(payload) {
   const db=admin(); const {data:records,error}=await db.from('communication_integrations').select('*').or('provider.eq.gmail,provider.like.gmail:%'); if(error)throw error;
   const record=(records||[]).find((r)=>String(r.organization_name||'').toLowerCase()===String(payload.from||'').toLowerCase()); if(!record)throw new Error('Gmail sender is not connected');
   const {accessToken}=await gmailAccessToken(record);
-  const mime=['From: '+payload.from,'To: '+payload.to.join(', '),'Subject: '+payload.subject,'MIME-Version: 1.0','Content-Type: text/plain; charset=UTF-8','',payload.body].join('\r\n');
+  const mime=makeOutgoingMime(payload,validatedOutgoingAttachments(payload));
   const raw=Buffer.from(mime).toString('base64url'); const sent=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send',{method:'POST',headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},body:JSON.stringify({raw,threadId:payload.threadId||undefined})});
   const result=await sent.json(); if(!sent.ok)throw new Error('Gmail send failed: '+(result.error?.message||sent.status)); return {provider:'gmail',providerMessageId:result.id,threadId:result.threadId};
 }
 async function sendZoho(payload) {
+ if(validatedOutgoingAttachments(payload).length)throw Error('Zoho attachment sending is not yet enabled. Files were not sent. Your draft is preserved.');
  const db=admin(),{data:records,error}=await db.from('communication_integrations').select('*').or('provider.eq.zoho,provider.like.zoho:%');if(error)throw error;
  const candidates=[...(records||[])].sort((a,b)=>Number(String(b.organization_name||'').toLowerCase()===String(payload.from).toLowerCase())-Number(String(a.organization_name||'').toLowerCase()===String(payload.from).toLowerCase()));let rejected='';
  for(const record of candidates){const refreshed=await pchZohoTokenFetch20261005('https://accounts.zoho.com/oauth/v2/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'refresh_token',client_id:env('ZOHO_CLIENT_ID'),client_secret:env('ZOHO_CLIENT_SECRET'),refresh_token:decryptToken(record)})});const token=await refreshed.json();if(!refreshed.ok||!token.access_token)continue;
