@@ -572,7 +572,7 @@ async function loadFullMessage(id,allowedMailboxes=null){
 async function listMessages(url, allowedMailboxes=null) {
   const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 200), 1), 500);
   const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
-  let query = admin().from('pch_compact_messages').select('*', {
+  let query = admin().from(url.searchParams.get('archiveFolderId')?'pch_archive_folder_view':'pch_compact_messages').select('*', {
     count: 'exact'
   }).order('received_at', {
     ascending: false
@@ -582,6 +582,7 @@ async function listMessages(url, allowedMailboxes=null) {
   const search = (url.searchParams.get('search') || '').trim();
   const folder = (url.searchParams.get('folder') || '').toLowerCase();
   const allFolders = url.searchParams.get('allFolders') === 'true' || Boolean(search) || Boolean(folder);
+  if(url.searchParams.get('archiveFolderId'))query=query.eq('archive_folder_id',url.searchParams.get('archiveFolderId'));
   if(allowedMailboxes)query=query.in('mailbox_owner',allowedMailboxes);
   if (provider) query = query.eq('provider', provider);
   if (mailbox) query = query.eq('mailbox_owner', mailbox);
@@ -920,6 +921,36 @@ Deno.serve(async (request)=>{
       const result=await admin().from('pch_spam_sender_jobs').select('id,status,result').eq('id',id).maybeSingle();
       if(result.error)throw result.error;
       return result.data?response(200,result.data):response(404,{error:'Job not found'});
+    }
+    if(path==='/archive/folders'&&request.method==='GET'){
+      const {data,error}=await admin().from('pch_archive_folders').select('id,name,created_at').order('name');
+      if(error)throw error;return response(200,{folders:data||[]});
+    }
+    if(path==='/archive/folders'&&request.method==='POST'){
+      const p=await request.json(),name=String(p.name||'').trim();
+      if(!name||name.length>100)return response(400,{error:'Folder name must be 1–100 characters'});
+      const {data,error}=await admin().from('pch_archive_folders').insert({name}).select('id,name').single();
+      if(error)return response(400,{error:error.code==='23505'?'Folder already exists':error.message});
+      return response(200,{folder:data});
+    }
+    if(path==='/archive/folders/move'&&request.method==='POST'){
+      const p=await request.json(),folderId=String(p.folderId||''),ids=[...new Set(Array.isArray(p.ids)?p.ids:[])].slice(0,100);
+      if(!ids.length)return response(400,{error:'No messages selected'});
+      const folder=await admin().from('pch_archive_folders').select('id').eq('id',folderId).maybeSingle();
+      if(folder.error)throw folder.error;if(!folder.data)return response(404,{error:'Archive subfolder not found'});
+      const {data:rows,error}=await admin().from('communication_messages').select('id,provider,mailbox_owner,raw_metadata,provider_labels').in('id',ids);
+      if(error)throw error;
+      const moved=[],failed=[];
+      for(const row of rows||[]){try{
+        const alreadyArchived=row.raw_metadata?.hubFolder==='archive'||(row.provider==='gmail'&&!(row.provider_labels||[]).includes('INBOX')&&!(row.provider_labels||[]).includes('SPAM')&&!(row.provider_labels||[]).includes('TRASH'));
+        if(!alreadyArchived){
+          const res=await executeMessageAction({id:row.id,provider:row.provider,mailbox:row.mailbox_owner,action:'archive'});
+          if(res.status!==200)throw Error('Provider archive action failed');
+        }
+        const assigned=await admin().from('pch_archive_folder_messages').upsert({message_id:row.id,folder_id:folderId},{onConflict:'message_id'});
+        if(assigned.error)throw assigned.error;moved.push(row.id);
+      }catch(e){failed.push({id:row.id,error:String(e.message||e)})}}
+      return response(200,{moved,failed});
     }
     if(path==='/message/action'&&request.method==='POST')return await executeMessageAction(await request.json());
     if(path==='/message/translate'&&request.method==='POST')return response(200,await pchTranslatePreview20261005(await request.json()));
