@@ -573,7 +573,7 @@ async function listMessages(url, allowedMailboxes=null) {
   const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 200), 1), 500);
   const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
   let query = admin().from('pch_compact_messages').select('*', {
-    count: 'planned'
+    count: 'exact'
   }).order('received_at', {
     ascending: false
   }).range(offset, offset + limit - 1);
