@@ -177,6 +177,19 @@ async function persistMessageRows(rows, provider) {
  const ordered=[...rows].sort((a,b)=>String(a.id).localeCompare(String(b.id)));
  for(let start=0;start<ordered.length;start+=10){const{error}=await admin().from('communication_messages').upsert(ordered.slice(start,start+10),{onConflict:'id'});if(error)throw new Error(provider+' message storage failed: '+error.message);}
 }
+async function autoSpamNewKnownSenders(rows){
+ const db=admin();
+ const candidates=rows.filter(r=>r.raw_metadata?.spamCandidate&&!r.raw_metadata?.knownContact&&!r.important).slice(0,5);
+ if(!candidates.length)return;
+ const addresses=[...new Set(candidates.map(r=>String(r.sender_email||'').toLowerCase()))];
+ const rules=await db.from('communication_spam_learning').select('sender_email').eq('decision','spam').in('sender_email',addresses).limit(100);
+ if(rules.error)return;
+ const exact=new Set((rules.data||[]).map(x=>String(x.sender_email||'').toLowerCase()));
+ for(const row of candidates){
+  if(!exact.has(String(row.sender_email||'').toLowerCase()))continue;
+  try{await executeMessageAction({id:row.id,provider:row.provider,mailbox:row.mailbox_owner,action:'spam',senderBulk:true})}catch{}
+ }
+}
 async function syncGmail(recentOnly = false) {
   const db = admin();
   const { data: gmailRecords, error: gmailRecordsError } = await db.from('communication_integrations').select('*').or('provider.eq.gmail,provider.like.gmail:%');
@@ -257,6 +270,7 @@ async function syncGmail(recentOnly = false) {
   if (rows.length) {
     await applyLearnedRules(rows);
     await persistMessageRows(rows, 'Gmail');
+    if(recentOnly)await autoSpamNewKnownSenders(rows);
   }
   const { data: latestStored } = await db.from('communication_messages').select('received_at').eq('provider', 'gmail').eq('mailbox_owner', mailbox).order('received_at', {
     ascending: false
@@ -516,6 +530,7 @@ async function syncZoho() {
   if (rows.length) {
     await applyLearnedRules(rows);
     const saved=await db.rpc('pch_upsert_zoho_metadata',{p_rows:rows});if(saved.error)throw saved.error;
+    await autoSpamNewKnownSenders(rows);
   }
   const newest = rows.map((row)=>row.received_at).sort().at(-1) ?? sync?.last_message_at ?? null;
   const hasMore = nextAccount!==0||authorizedAccounts.some(account=>Number(cursors[field(account,'accountId','accountID')])>1);
