@@ -194,9 +194,9 @@ async function syncGmail(recentOnly = false) {
     includeSpamTrash: 'true'
   });
   let savedCursor=null;try{savedCursor=JSON.parse(sync?.history_cursor||'null')}catch{}
-  if(sync?.history_cursor){params.set('pageToken',savedCursor?.pageToken||sync.history_cursor);if(savedCursor?.query)params.set('q',savedCursor.query)}
+  if(recentOnly){params.set('maxResults','20');params.set('q','after:'+String(Math.floor((Date.now()-86400000)/1000)))}
+  else if(sync?.history_cursor){params.set('pageToken',savedCursor?.pageToken||sync.history_cursor);if(savedCursor?.query)params.set('q',savedCursor.query)}
   else if(sync?.initial_import_complete&&sync.last_message_at)params.set('q','after:'+String(Math.floor(new Date(sync.last_message_at).getTime()/1000)-1));
-  else if(recentOnly)params.set('q','after:'+String(Math.floor(Date.now()/1000)-86400));
   const authorization = {
     Authorization: `Bearer ${accessToken}`
   };
@@ -206,7 +206,8 @@ async function syncGmail(recentOnly = false) {
   if (!listed.ok) throw new Error(`Gmail list failed (${listed.status})`);
   const page = await listed.json();
   const rows = [];
-  const items = page.messages ?? [];
+  let items = page.messages ?? [];
+  if(recentOnly&&items.length){const ids=items.map(x=>'gmail:'+x.id);const known=await db.from('communication_messages').select('id').in('id',ids);if(known.error)throw known.error;const found=new Set((known.data||[]).map(x=>x.id));items=items.filter(x=>!found.has('gmail:'+x.id))}
   const detailParams = new URLSearchParams({
     format: 'full'
   });
@@ -263,8 +264,8 @@ async function syncGmail(recentOnly = false) {
   const newest = latestStored?.received_at ?? sync?.last_message_at ?? null;
   const { error: stateError } = await db.from('communication_sync_state').upsert({
     provider: syncProvider,
-    history_cursor: page.nextPageToken ? JSON.stringify({pageToken:page.nextPageToken,query:params.get('q')||''}) : null,
-    initial_import_complete: !page.nextPageToken,
+    history_cursor: recentOnly ? (sync?.history_cursor||null) : (page.nextPageToken ? JSON.stringify({pageToken:page.nextPageToken,query:params.get('q')||''}) : null),
+    initial_import_complete: recentOnly ? (sync?.initial_import_complete||false) : !page.nextPageToken,
     last_message_at: newest,
     last_sync_at: new Date().toISOString(),
     last_error: null,
@@ -430,7 +431,7 @@ async function syncZoho() {
     if (!accountId) continue;
     const mailbox = field(account, 'primaryEmailAddress', 'mailboxAddress', 'mailId') || 'Zoho';
     const savedCursor = previouslyAuthorized.has(mailbox) ? Number(cursors[accountId] ?? 1) : 1;
-    const start = savedCursor < 0 ? 1 : Math.max(savedCursor, 1);
+    const start = 1;
     const mailboxHeaders = accessById.get(accountId);
     if (!mailboxHeaders) {
       mailboxResults.push({
@@ -440,7 +441,7 @@ async function syncZoho() {
       });
       continue;
     }
-    const result = await fetch(`https://mail.zoho.com/api/accounts/${encodeURIComponent(accountId)}/messages/view?start=${start}&limit=100&sortBy=date&sortorder=false&includeto=true`, {
+    const result = await fetch(`https://mail.zoho.com/api/accounts/${encodeURIComponent(accountId)}/messages/view?start=${start}&limit=20&sortBy=date&sortorder=false&includeto=true`, {
       headers: mailboxHeaders
     });
     if (!result.ok) {
@@ -462,9 +463,11 @@ async function syncZoho() {
       });
       continue;
     }
-    const page = extractAccountRecords(payload);
+    let page = extractAccountRecords(payload);
+    const candidateIds=page.map(x=>'zoho:'+accountId+':'+field(x,'messageId','messageID')).filter(x=>!x.endsWith(':'));
+    if(candidateIds.length){const known=await db.from('communication_messages').select('id').in('id',candidateIds);if(known.error)throw known.error;const seen=new Set((known.data||[]).map(x=>x.id));page=page.filter(x=>!seen.has('zoho:'+accountId+':'+field(x,'messageId','messageID')))}
     const metadataById=new Map(),bodies=new Map();
-    cursors[accountId] = savedCursor < 0 ? -1 : page.length === 100 ? start + 100 : -1;
+    cursors[accountId] = -1;
     mailboxResults.push({
       mailbox,
       imported: page.length,
