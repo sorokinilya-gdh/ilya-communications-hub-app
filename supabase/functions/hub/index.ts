@@ -573,7 +573,7 @@ async function listMessages(url, allowedMailboxes=null) {
   const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 200), 1), 500);
   const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
   let query = admin().from('pch_compact_messages').select('*', {
-    count: 'exact'
+    count: 'planned'
   }).order('received_at', {
     ascending: false
   }).range(offset, offset + limit - 1);
@@ -603,16 +603,7 @@ async function listMessages(url, allowedMailboxes=null) {
   let { data, error, count } = await query;
   if(error?.code==='PGRST103'){const first=await query.range(0,0);if(first.error)throw first.error;data=[];error=null;count=first.count;}
   if (error) throw error;
-  let mailboxQuery = admin().from('pch_compact_messages').select('mailbox_owner');
-  if(allowedMailboxes)mailboxQuery=mailboxQuery.in('mailbox_owner',allowedMailboxes);
-  if (provider) mailboxQuery = mailboxQuery.eq('provider', provider);
-  mailboxQuery = provider === 'gmail' ? mailboxQuery.contains('provider_labels', [
-    'INBOX'
-  ]) : provider ? mailboxQuery : mailboxQuery.or('and(provider.eq.gmail,provider_labels.cs.{INBOX}),and(provider.eq.zoho,hub_folder.eq.inbox),and(provider.eq.zoho,hub_folder.is.null)');
-
-  const { data: mailboxRows } = await mailboxQuery;
   const counts = new Map();
-  for (const row of mailboxRows ?? [])counts.set(row.mailbox_owner, (counts.get(row.mailbox_owner) ?? 0) + 1);
   return {
     messages: await (async()=>{const knowledge=await contactKnowledge();return(data||[]).map(row=>{const d=classifyPersonalMessage(row,knowledge);return {...uiMessage({...row,important:d.important,raw_metadata:{...(row.raw_metadata||{}),knownContact:d.knownContact,classificationReason:d.reason}}),body:row.preview,html:'',bodyHydrated:false}})})(),
     total: count ?? 0,
