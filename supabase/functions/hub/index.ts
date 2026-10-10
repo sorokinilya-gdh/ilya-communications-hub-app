@@ -592,6 +592,7 @@ async function listMessages(url, allowedMailboxes=null) {
     }
   }
   if(folder==='inbox') query=query.or('and(provider.eq.gmail,provider_labels.cs.{INBOX}),and(provider.eq.zoho,hub_folder.eq.inbox),and(provider.eq.zoho,hub_folder.is.null)');
+  else if(folder==='sent') query=query.or('and(provider.eq.gmail,provider_labels.cs.{SENT}),and(provider.eq.zoho,hub_folder.eq.sent)');
   else if(folder==='archive') query=query.or('and(provider.eq.gmail,provider_labels.not.cs.{INBOX},provider_labels.not.cs.{TRASH},provider_labels.not.cs.{SPAM}),and(provider.eq.zoho,hub_folder.eq.archive)');
   else if(folder==='spam')query=query.or('provider_labels.cs.{SPAM},hub_folder.eq.spam');
   else if(folder==='trash')query=query.or('provider_labels.cs.{TRASH},hub_folder.eq.trash');
