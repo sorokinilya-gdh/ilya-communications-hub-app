@@ -1,0 +1,10 @@
+import fs from 'node:fs';import assert from 'node:assert/strict';
+const root='C:/Users/Ilya/Documents/GitHub/ilya-communications-hub-recovered/site/';
+let s=fs.readFileSync(root+'assets/index-SenderSpam20261010.js','utf8');
+const old="m.jsx('button',{disabled:busy,onClick:e=>{e.stopPropagation();if(e.detail>1)return;folder==='trash'?remove('one',item):move(item,false)},children:'Delete'})";
+assert(s.includes(old));s=s.replace(old,"m.jsx('button',{disabled:busy,onClick:e=>{e.stopPropagation();if(e.detail>1)return;folder==='trash'?remove('one',item):move(item,false)},children:'Delete'}),folder!=='trash'&&folder!=='spam'&&m.jsx('button',{disabled:busy,onClick:()=>spamAllSender(item),title:'Move all messages from this exact sender to Spam in every connected mailbox',children:'Spam sender'})");
+const old2="const result=await HubRunSelected20261004([...selected].map(id=>selectedRecords.current.get(id)).filter(Boolean),action,folder,(done,total)=>setNotice(\"Processing \"+done+\" / \"+total));succeeded=result.succeeded;failed=result.failed;";
+assert(s.includes(old2));
+s=s.replace(old2,"const records=[...selected].map(id=>selectedRecords.current.get(id)).filter(Boolean);if(action==='spam'){const seen=new Set();for(const item of records){const sender=String(item.email||item.senderEmail||'').toLowerCase();if(sender&&seen.has(sender))continue;if(sender)seen.add(sender);try{const {data}=await Un.post('/message/spam-sender',{id:item.id});succeeded.push(item.id);if(data.failed?.length)failed.push(...data.failed);setNotice('Processed '+seen.size+' senders; moved '+data.moved+' messages for latest sender')}catch(e){failed.push({id:item.id,error:e.message})}}}else{const result=await HubRunSelected20261004(records,action,folder,(done,total)=>setNotice(\"Processing \"+done+\" / \"+total));succeeded=result.succeeded;failed=result.failed;}");
+fs.writeFileSync(root+'assets/index-SenderSpam20261010.js',s);
+console.log('Spam sender button and selected spam action updated');
