@@ -27,19 +27,20 @@ const response = (status, value)=>new Response(JSON.stringify(value), {
   });
 const appUrl = ()=>env('APP_URL').replace(/\/$/, '');
 const redirectUri = (provider)=>`${appUrl()}/?oauth=${provider}`;
+const verifiedSessionCache=new Map();
 async function requireIlya(request) {
-  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
-  if (!token) return response(401, {
-    error: 'Authentication required.'
-  });
-  const client = createClient(env('SUPABASE_URL'), env('SUPABASE_ANON_KEY'));
-  const { data, error } = await client.auth.getUser(token);
-  if (error || data.user?.email?.toLowerCase() !== allowedEmail) {
-    return response(403, {
-      error: 'This private workspace is available only to Ilya.'
-    });
-  }
-  return null;
+ const token=request.headers.get('authorization')?.replace(/^Bearer\s+/i,'');
+ if(!token)return response(401,{error:'Authentication required.'});
+ const key=createHash('sha256').update(token).digest('hex'),now=Date.now();
+ const cached=verifiedSessionCache.get(key);
+ if(cached&&cached>now)return null;
+ const client=createClient(env('SUPABASE_URL'),env('SUPABASE_ANON_KEY'),{auth:{persistSession:false,autoRefreshToken:false}});
+ let data,error;
+ try{({data,error}=await client.auth.getUser(token))}catch{return response(503,{error:'Authentication temporarily unavailable. Please retry later.'})}
+ if(error||data.user?.email?.toLowerCase()!==allowedEmail)return response(403,{error:'This private workspace is available only to Ilya.'});
+ const jwt=token.split('.')[1];let expiry=now+60000;try{const payload=JSON.parse(Buffer.from(jwt,'base64url').toString('utf8'));if(Number(payload.exp))expiry=Math.min(expiry,Number(payload.exp)*1000-5000)}catch{}
+ if(expiry>now){if(verifiedSessionCache.size>=100)verifiedSessionCache.clear();verifiedSessionCache.set(key,expiry)}
+ return null;
 }
 function state() {
   const timestamp = String(Date.now());
@@ -625,7 +626,7 @@ async function listMessages(url, allowedMailboxes=null) {
   if (error) throw error;
   const counts = new Map();
   return {
-    messages: await (async()=>{const knowledge=await contactKnowledge();return(data||[]).map(row=>{const d=classifyPersonalMessage(row,knowledge);return {...uiMessage({...row,important:d.important,raw_metadata:{...(row.raw_metadata||{}),knownContact:d.knownContact,classificationReason:d.reason}}),body:row.preview,html:'',bodyHydrated:false}})})(),
+    messages: (data||[]).map(row=>({...uiMessage(row),body:row.preview,html:'',bodyHydrated:false})),
     total: count ?? 0,
     mailboxes: [
       ...counts
