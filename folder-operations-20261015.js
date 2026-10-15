@@ -12,8 +12,8 @@ function HubOpsQueue20261015(path,body,records=[]){
  if(!empty&&state.marks[body.id]?.folder==='deleted')throw Error('Deleted messages cannot be restored or changed');
  const folder=action==='important'?(state.marks[body.id]?.folder||records[0]?.folder||'inbox'):action==='delete'?'deleted':action==='trash'?'trash':action==='spam'?'spam':action==='archive'?'archive':'inbox';
  if(empty){state.empty=state.empty.filter(x=>x.folder!==body.folder);state.empty.push({folder:body.folder,before:body.before,at:now})}
- else for(const record of records){const {body:ignoredBody,html:ignoredHtml,...compact}=record;state.marks[record.id]={folder,at:now,...(action==='important'?{priority:body.important===true}:{}),record:folder==='deleted'?{id:record.id}:{...compact,...(action==='important'?{priority:body.important===true}:{})}}}
- state.jobs.push({id,path,body,at:now,nextAt:now,attempt:0});HubOpsSave20261015(state);HubOpsSchedule20261015(100);
+ else for(const record of records){const previous=state.marks[record.id]?.folder||record.folder||'inbox';if(previous!==folder){(state.deltas||=[]).push({jobId:id,mailbox:record.mailboxOwner||'',provider:String(record.provider||'').toLowerCase(),from:previous,to:folder,at:now,syncedAt:null})}const {body:ignoredBody,html:ignoredHtml,...compact}=record;state.marks[record.id]={folder,at:now,...(action==='important'?{priority:body.important===true}:{}),record:folder==='deleted'?{id:record.id}:{...compact,...(action==='important'?{priority:body.important===true}:{})}}}
+ state.jobs.push({id,path,body,at:now,nextAt:now,attempt:0});HubOpsSave20261015(state);for(const change of state.deltas||[])if(change.jobId===id)window.dispatchEvent(new CustomEvent('hub-local-inbox-delta',{detail:{mailbox:change.mailbox,delta:Number(change.to==='inbox')-Number(change.from==='inbox')}}));HubOpsSchedule20261015(100);
  return{data:{ok:true,indexed:true,queued:true,important:body.important,deleted:action==='delete'?records.map(x=>x.id):[],failed:[],done:true}};
 }
 function HubOpsSchedule20261015(delay=30000){clearTimeout(HubOpsTimer20261015);HubOpsTimer20261015=setTimeout(()=>void HubOpsDrain20261015(),delay)}
@@ -27,7 +27,7 @@ async function HubOpsDrain20261015(){
   if((job.path==='/message/action')&&(data.ok!==true||data.indexed!==true))throw Error('Provider did not acknowledge the saved action.');
   const fresh=HubOpsRead20261015();
   if(job.path==='/folders/delete-indexed-batch'&&!data.done){const j=fresh.jobs.find(x=>x.id===job.id);if(j)j.nextAt=Date.now()+30000}
-  else fresh.jobs=fresh.jobs.filter(x=>x.id!==job.id);
+  else{fresh.jobs=fresh.jobs.filter(x=>x.id!==job.id);for(const d of fresh.deltas||[])if(d.jobId===job.id)d.syncedAt=Date.now();}
   HubOpsSave20261015(fresh);
  }catch(error){const fresh=HubOpsRead20261015(),j=fresh.jobs.find(x=>x.id===job.id);if(j){j.attempt++;j.error=String(error.message||error);j.nextAt=Date.now()+Math.min(6*3600000,60000*2**Math.min(j.attempt,8));}HubOpsSave20261015(fresh);HubOpsError20261015(error)}
  finally{HubOpsBusy20261015=false;HubOpsSchedule20261015()}
@@ -35,15 +35,15 @@ async function HubOpsDrain20261015(){
 function HubOpsApply20261015(data,path){
  const state=HubOpsRead20261015(),url=new URL(path,'https://hub.invalid'),folder=url.searchParams.get('folder')||((url.searchParams.get('search')||url.searchParams.get('allFolders')==='true')?'all':'inbox'),mailbox=url.searchParams.get('mailbox')||'',search=url.searchParams.get('search')||'';
  const source=data.messages||[];for(const row of source)HubRows20261015.set(row.id,row);
- let removed=0;const rows=source.filter(row=>{const mark=state.marks[row.id],empty=state.empty.find(x=>x.folder===(row.folder||folder)&&Date.parse(row.time||0)<=Date.parse(x.before));const hide=mark?(mark.folder==='deleted'||folder!=='all'&&folder!=='all'&&folder!=='all'&&folder!=='all'&&mark.folder!==folder):!!empty;if(hide)removed++;return!hide}).map(row=>state.marks[row.id]?.priority!==undefined?{...row,priority:state.marks[row.id].priority}:row);
+ let removed=0;const rows=source.filter(row=>{const mark=state.marks[row.id],empty=state.empty.find(x=>x.folder===(row.folder||folder)&&Date.parse(row.time||0)<=Date.parse(x.before));const hide=mark?(mark.folder==='deleted'||folder!=='all'&&folder!=='all'&&folder!=='all'&&folder!=='all'&&folder!=='all'&&mark.folder!==folder):!!empty;if(hide)removed++;return!hide}).map(row=>state.marks[row.id]?.priority!==undefined?{...row,priority:state.marks[row.id].priority}:row);
  if(folder!=='all'&&!search&&!Number(url.searchParams.get('offset')))for(const mark of Object.values(state.marks)){const row=mark.record;if(mark.folder===folder&&!state.empty.some(e=>e.folder===folder&&e.at>=mark.at)&&row&&(!mailbox||row.mailboxOwner===mailbox)&&!rows.some(x=>x.id===row.id))rows.unshift({...row,folder})}
  const emptied=state.empty.some(x=>x.folder===folder);
- return{...data,messages:rows,total:emptied?rows.length:Math.max(rows.length,(data.total||0)-removed)};
+ const provider=String(url.searchParams.get('provider')||'').toLowerCase();const delta=(state.deltas||[]).filter(d=>(!d.syncedAt||d.syncedAt>(data.__fetchedAt||0))&&(!mailbox||d.mailbox===mailbox)&&(!provider||d.provider===provider)).reduce((n,d)=>n+(folder==='all'?Number(d.to!=='deleted')-Number(d.from!=='deleted'):Number(d.to===folder)-Number(d.from===folder)),0);return{...data,messages:rows,total:emptied?rows.length:Math.max(rows.length,(data.total||0)+(search||url.searchParams.get('importantOnly')==='true'?-removed:delta))};
 }
 async function HubGet20261015(path){
  if(!/^(\/messages|\/search)(\?|$)/.test(path))return by(path);
  const key='hub:folder-cache:v2:'+path;
- try{const result=await by(path);const compact={...result.data,messages:(result.data.messages||[]).map(({body,html,...row})=>({...row,bodyHydrated:false}))};try{const keys=Object.keys(localStorage).filter(x=>x.startsWith('hub:folder-cache:v2:'));while(keys.length>=20)localStorage.removeItem(keys.shift());localStorage.setItem(key,JSON.stringify(compact))}catch{}return{...result,data:HubOpsApply20261015(result.data,path)}}
+ try{const result=await by(path);result.data={...result.data,__fetchedAt:Date.now()};const compact={...result.data,messages:(result.data.messages||[]).map(({body,html,...row})=>({...row,bodyHydrated:false}))};try{const keys=Object.keys(localStorage).filter(x=>x.startsWith('hub:folder-cache:v2:'));while(keys.length>=20)localStorage.removeItem(keys.shift());localStorage.setItem(key,JSON.stringify(compact))}catch{}return{...result,data:HubOpsApply20261015(result.data,path)}}
  catch(error){HubOpsError20261015(error);const saved=localStorage.getItem(key),state=HubOpsRead20261015(),folder=new URL(path,'https://hub.invalid').searchParams.get('folder');if(saved||state.empty.some(x=>x.folder===folder)||folder==='inbox'&&Object.values(state.marks).some(x=>x.folder==='inbox'))return{data:HubOpsApply20261015(saved?JSON.parse(saved):{messages:[],total:0},path)};throw error}
 }
 async function HubQueuedPost20261015(path,body){
