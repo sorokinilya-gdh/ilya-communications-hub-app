@@ -3,7 +3,7 @@ import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, 
 import { Buffer } from 'node:buffer';
 const cors = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-gdh-bridge-key',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
 };
 const allowedEmail = 'sorokin.ilya@gmail.com';
@@ -27,19 +27,20 @@ const response = (status, value)=>new Response(JSON.stringify(value), {
   });
 const appUrl = ()=>env('APP_URL').replace(/\/$/, '');
 const redirectUri = (provider)=>`${appUrl()}/?oauth=${provider}`;
+const verifiedSessionCache=new Map();
 async function requireIlya(request) {
-  const token = request.headers.get('authorization')?.replace(/^Bearer\s+/i, '');
-  if (!token) return response(401, {
-    error: 'Authentication required.'
-  });
-  const client = createClient(env('SUPABASE_URL'), env('SUPABASE_ANON_KEY'));
-  const { data, error } = await client.auth.getUser(token);
-  if (error || data.user?.email?.toLowerCase() !== allowedEmail) {
-    return response(403, {
-      error: 'This private workspace is available only to Ilya.'
-    });
-  }
-  return null;
+ const token=request.headers.get('authorization')?.replace(/^Bearer\s+/i,'');
+ if(!token)return response(401,{error:'Authentication required.'});
+ const key=createHash('sha256').update(token).digest('hex'),now=Date.now();
+ const cached=verifiedSessionCache.get(key);
+ if(cached&&cached>now)return null;
+ const client=createClient(env('SUPABASE_URL'),env('SUPABASE_ANON_KEY'),{auth:{persistSession:false,autoRefreshToken:false}});
+ let data,error;
+ try{({data,error}=await client.auth.getUser(token))}catch{return response(503,{error:'Authentication temporarily unavailable. Please retry later.'})}
+ if(error||data.user?.email?.toLowerCase()!==allowedEmail)return response(403,{error:'This private workspace is available only to Ilya.'});
+ const jwt=token.split('.')[1];let expiry=now+60000;try{const payload=JSON.parse(Buffer.from(jwt,'base64url').toString('utf8'));if(Number(payload.exp))expiry=Math.min(expiry,Number(payload.exp)*1000-5000)}catch{}
+ if(expiry>now){if(verifiedSessionCache.size>=100)verifiedSessionCache.clear();verifiedSessionCache.set(key,expiry)}
+ return null;
 }
 function state() {
   const timestamp = String(Date.now());
@@ -170,12 +171,26 @@ async function gmailAccessToken(recordOverride = null) {
   }
   return {
     accessToken: data.access_token,
+    scopes: data.scope || '',
     mailbox: record.organization_name
   };
 }
 async function persistMessageRows(rows, provider) {
  const ordered=[...rows].sort((a,b)=>String(a.id).localeCompare(String(b.id)));
  for(let start=0;start<ordered.length;start+=10){const{error}=await admin().from('communication_messages').upsert(ordered.slice(start,start+10),{onConflict:'id'});if(error)throw new Error(provider+' message storage failed: '+error.message);}
+}
+async function autoSpamNewKnownSenders(rows){
+ const db=admin();
+ const candidates=rows.filter(r=>r.raw_metadata?.spamCandidate&&!r.raw_metadata?.knownContact&&!r.important).slice(0,5);
+ if(!candidates.length)return;
+ const addresses=[...new Set(candidates.map(r=>String(r.sender_email||'').toLowerCase()))];
+ const rules=await db.from('communication_spam_learning').select('sender_email').eq('decision','spam').in('sender_email',addresses).limit(100);
+ if(rules.error)return;
+ const exact=new Set((rules.data||[]).map(x=>String(x.sender_email||'').toLowerCase()));
+ for(const row of candidates){
+  if(!exact.has(String(row.sender_email||'').toLowerCase()))continue;
+  try{await executeMessageAction({id:row.id,provider:row.provider,mailbox:row.mailbox_owner,action:'spam',senderBulk:true})}catch{}
+ }
 }
 async function syncGmail(recentOnly = false) {
   const db = admin();
@@ -194,9 +209,9 @@ async function syncGmail(recentOnly = false) {
     includeSpamTrash: 'true'
   });
   let savedCursor=null;try{savedCursor=JSON.parse(sync?.history_cursor||'null')}catch{}
-  if(sync?.history_cursor){params.set('pageToken',savedCursor?.pageToken||sync.history_cursor);if(savedCursor?.query)params.set('q',savedCursor.query)}
+  if(recentOnly){params.set('maxResults','50');params.set('q','after:'+String(Math.floor((Date.now()-86400000)/1000)))}
+  else if(sync?.history_cursor){params.set('pageToken',savedCursor?.pageToken||sync.history_cursor);if(savedCursor?.query)params.set('q',savedCursor.query)}
   else if(sync?.initial_import_complete&&sync.last_message_at)params.set('q','after:'+String(Math.floor(new Date(sync.last_message_at).getTime()/1000)-1));
-  else if(recentOnly)params.set('q','after:'+String(Math.floor(Date.now()/1000)-86400));
   const authorization = {
     Authorization: `Bearer ${accessToken}`
   };
@@ -206,7 +221,8 @@ async function syncGmail(recentOnly = false) {
   if (!listed.ok) throw new Error(`Gmail list failed (${listed.status})`);
   const page = await listed.json();
   const rows = [];
-  const items = page.messages ?? [];
+  let items = page.messages ?? [];
+  if(recentOnly&&items.length){const ids=items.map(x=>'gmail:'+x.id);const known=await db.from('communication_messages').select('id').in('id',ids);if(known.error)throw known.error;const found=new Set((known.data||[]).map(x=>x.id));items=items.filter(x=>!found.has('gmail:'+x.id))}
   const detailParams = new URLSearchParams({
     format: 'full'
   });
@@ -256,6 +272,7 @@ async function syncGmail(recentOnly = false) {
   if (rows.length) {
     await applyLearnedRules(rows);
     await persistMessageRows(rows, 'Gmail');
+    if(recentOnly)await autoSpamNewKnownSenders(rows);
   }
   const { data: latestStored } = await db.from('communication_messages').select('received_at').eq('provider', 'gmail').eq('mailbox_owner', mailbox).order('received_at', {
     ascending: false
@@ -263,8 +280,8 @@ async function syncGmail(recentOnly = false) {
   const newest = latestStored?.received_at ?? sync?.last_message_at ?? null;
   const { error: stateError } = await db.from('communication_sync_state').upsert({
     provider: syncProvider,
-    history_cursor: page.nextPageToken ? JSON.stringify({pageToken:page.nextPageToken,query:params.get('q')||''}) : null,
-    initial_import_complete: !page.nextPageToken,
+    history_cursor: recentOnly ? (sync?.history_cursor||null) : (page.nextPageToken ? JSON.stringify({pageToken:page.nextPageToken,query:params.get('q')||''}) : null),
+    initial_import_complete: recentOnly ? (sync?.initial_import_complete||false) : !page.nextPageToken,
     last_message_at: newest,
     last_sync_at: new Date().toISOString(),
     last_error: null,
@@ -430,7 +447,7 @@ async function syncZoho() {
     if (!accountId) continue;
     const mailbox = field(account, 'primaryEmailAddress', 'mailboxAddress', 'mailId') || 'Zoho';
     const savedCursor = previouslyAuthorized.has(mailbox) ? Number(cursors[accountId] ?? 1) : 1;
-    const start = savedCursor < 0 ? 1 : Math.max(savedCursor, 1);
+    const start = 1;
     const mailboxHeaders = accessById.get(accountId);
     if (!mailboxHeaders) {
       mailboxResults.push({
@@ -440,7 +457,7 @@ async function syncZoho() {
       });
       continue;
     }
-    const result = await fetch(`https://mail.zoho.com/api/accounts/${encodeURIComponent(accountId)}/messages/view?start=${start}&limit=100&sortBy=date&sortorder=false&includeto=true`, {
+    const result = await fetch(`https://mail.zoho.com/api/accounts/${encodeURIComponent(accountId)}/messages/view?start=${start}&limit=50&sortBy=date&sortorder=false&includeto=true`, {
       headers: mailboxHeaders
     });
     if (!result.ok) {
@@ -462,9 +479,11 @@ async function syncZoho() {
       });
       continue;
     }
-    const page = extractAccountRecords(payload);
+    let page = extractAccountRecords(payload);
+    const candidateIds=page.map(x=>'zoho:'+accountId+':'+field(x,'messageId','messageID')).filter(x=>!x.endsWith(':'));
+    if(candidateIds.length){const known=await db.from('communication_messages').select('id').in('id',candidateIds);if(known.error)throw known.error;const seen=new Set((known.data||[]).map(x=>x.id));page=page.filter(x=>!seen.has('zoho:'+accountId+':'+field(x,'messageId','messageID')))}
     const metadataById=new Map(),bodies=new Map();
-    cursors[accountId] = savedCursor < 0 ? -1 : page.length === 100 ? start + 100 : -1;
+    cursors[accountId] = -1;
     mailboxResults.push({
       mailbox,
       imported: page.length,
@@ -513,6 +532,7 @@ async function syncZoho() {
   if (rows.length) {
     await applyLearnedRules(rows);
     const saved=await db.rpc('pch_upsert_zoho_metadata',{p_rows:rows});if(saved.error)throw saved.error;
+    await autoSpamNewKnownSenders(rows);
   }
   const newest = rows.map((row)=>row.received_at).sort().at(-1) ?? sync?.last_message_at ?? null;
   const hasMore = nextAccount!==0||authorizedAccounts.some(account=>Number(cursors[field(account,'accountId','accountID')])>1);
@@ -572,7 +592,7 @@ async function loadFullMessage(id,allowedMailboxes=null){
 async function listMessages(url, allowedMailboxes=null) {
   const limit = Math.min(Math.max(Number(url.searchParams.get('limit') || 200), 1), 500);
   const offset = Math.max(Number(url.searchParams.get('offset') || 0), 0);
-  let query = admin().from('pch_compact_messages').select('*', {
+  let query = admin().from(url.searchParams.get('archiveFolderId')?'pch_archive_folder_view':'pch_compact_messages').select('*', {
     count: 'exact'
   }).order('received_at', {
     ascending: false
@@ -582,6 +602,7 @@ async function listMessages(url, allowedMailboxes=null) {
   const search = (url.searchParams.get('search') || '').trim();
   const folder = (url.searchParams.get('folder') || '').toLowerCase();
   const allFolders = url.searchParams.get('allFolders') === 'true' || Boolean(search) || Boolean(folder);
+  if(url.searchParams.get('archiveFolderId'))query=query.eq('archive_folder_id',url.searchParams.get('archiveFolderId'));
   if(allowedMailboxes)query=query.in('mailbox_owner',allowedMailboxes);
   if (provider) query = query.eq('provider', provider);
   if (mailbox) query = query.eq('mailbox_owner', mailbox);
@@ -592,6 +613,7 @@ async function listMessages(url, allowedMailboxes=null) {
     }
   }
   if(folder==='inbox') query=query.or('and(provider.eq.gmail,provider_labels.cs.{INBOX}),and(provider.eq.zoho,hub_folder.eq.inbox),and(provider.eq.zoho,hub_folder.is.null)');
+  else if(folder==='sent') query=query.or('and(provider.eq.gmail,provider_labels.cs.{SENT}),and(provider.eq.zoho,hub_folder.eq.sent)');
   else if(folder==='archive') query=query.or('and(provider.eq.gmail,provider_labels.not.cs.{INBOX},provider_labels.not.cs.{TRASH},provider_labels.not.cs.{SPAM}),and(provider.eq.zoho,hub_folder.eq.archive)');
   else if(folder==='spam')query=query.or('provider_labels.cs.{SPAM},hub_folder.eq.spam');
   else if(folder==='trash')query=query.or('provider_labels.cs.{TRASH},hub_folder.eq.trash');
@@ -603,18 +625,9 @@ async function listMessages(url, allowedMailboxes=null) {
   let { data, error, count } = await query;
   if(error?.code==='PGRST103'){const first=await query.range(0,0);if(first.error)throw first.error;data=[];error=null;count=first.count;}
   if (error) throw error;
-  let mailboxQuery = admin().from('pch_compact_messages').select('mailbox_owner');
-  if(allowedMailboxes)mailboxQuery=mailboxQuery.in('mailbox_owner',allowedMailboxes);
-  if (provider) mailboxQuery = mailboxQuery.eq('provider', provider);
-  mailboxQuery = provider === 'gmail' ? mailboxQuery.contains('provider_labels', [
-    'INBOX'
-  ]) : provider ? mailboxQuery : mailboxQuery.or('and(provider.eq.gmail,provider_labels.cs.{INBOX}),and(provider.eq.zoho,hub_folder.eq.inbox),and(provider.eq.zoho,hub_folder.is.null)');
-
-  const { data: mailboxRows } = await mailboxQuery;
   const counts = new Map();
-  for (const row of mailboxRows ?? [])counts.set(row.mailbox_owner, (counts.get(row.mailbox_owner) ?? 0) + 1);
   return {
-    messages: await (async()=>{const knowledge=await contactKnowledge();return(data||[]).map(row=>{const d=classifyPersonalMessage(row,knowledge);return {...uiMessage({...row,important:d.important,raw_metadata:{...(row.raw_metadata||{}),knownContact:d.knownContact,classificationReason:d.reason}}),body:row.preview,html:'',bodyHydrated:false}})})(),
+    messages: (data||[]).map(row=>({...uiMessage(row),body:row.preview,html:'',bodyHydrated:false})),
     total: count ?? 0,
     mailboxes: [
       ...counts
@@ -661,7 +674,7 @@ async function status(provider) {
 async function importGmailContacts(payload){const db=admin(),mailbox=String(payload.mailbox||'').toLowerCase();const {data:records,error}=await db.from('communication_integrations').select('*').or('provider.eq.gmail,provider.like.gmail:%');if(error)throw error;const record=(records||[]).find(r=>String(r.organization_name||'').toLowerCase()===mailbox);if(!record)throw Error('Choose a connected Gmail mailbox');const {accessToken}=await gmailAccessToken(record);const params=new URLSearchParams({personFields:'names,emailAddresses,organizations,phoneNumbers,urls',pageSize:'50'});if(payload.pageToken)params.set('pageToken',String(payload.pageToken));const result=await fetch('https://people.googleapis.com/v1/people/me/connections?'+params,{headers:{Authorization:'Bearer '+accessToken}});if(result.status===403)return{authorizationRequired:true,imported:0,error:'Google Contacts read permission is required. Enable Google Contacts, approve access, then import again.'};if(!result.ok)throw Error('Google Contacts import failed: '+result.status);const data=await result.json();let imported=0;for(const person of data.connections||[]){for(const address of person.emailAddresses||[]){const email=String(address.value||'').toLowerCase();if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))continue;const old=await db.from('personal_hub_contacts').select('*').eq('email',email).maybeSingle();if(old.error)throw old.error;const current=old.data||{},org=person.organizations?.[0]||{},linkedin=(person.urls||[]).find(x=>/^https?:\/\/(?:[a-z]{2}\.)?(?:www\.)?linkedin\.com\/in\//i.test(x.value||''))?.value||'';const contact={...current,email,name:current.name||person.names?.[0]?.displayName||email,company:current.company||org.name||'',title:current.title||org.title||'',phone:current.phone||person.phoneNumbers?.[0]?.value||'',linkedin_url:current.linkedin_url||linkedin,linkedin_status:current.linkedin_url?current.linkedin_status:linkedin?'address_book':'pending',evidence:{...(current.evidence||{}),googleResource:person.resourceName,googleMailbox:mailbox},updated_at:new Date().toISOString()};const saved=await db.from('personal_hub_contacts').upsert(contact,{onConflict:'email'});if(saved.error)throw saved.error;imported++;}}return{imported,nextPageToken:data.nextPageToken||null};}
 
 function importanceSubject(value){return String(value||'').toLowerCase().replace(/^(?:(?:re|fw|fwd):\s*)+/i,'').replace(/\s+/g,' ').trim();}
-async function contactKnowledge(){const db=admin();const [contacts,prefs]=await Promise.all([db.from('personal_hub_contacts').select('email,name').limit(10000),db.from('personal_hub_preferences').select('scope,key,importance,spam,updated_at').limit(20000)]);if(contacts.error)throw contacts.error;if(prefs.error)throw prefs.error;return{contacts:new Map((contacts.data||[]).map(x=>[x.email,x])),prefs:new Map((prefs.data||[]).map(x=>[x.scope+':'+x.key,x]))};}
+async function contactKnowledge(rows=null){const db=admin();const emails=rows?[...new Set(rows.map(r=>String(r.sender_email||'').toLowerCase()).filter(Boolean))]:null;const subjects=rows?[...new Set(rows.map(r=>importanceSubject(r.subject)).filter(Boolean))]:null;const ids=rows?rows.map(r=>'message:'+r.id):[];const keys=rows?[...emails.map(x=>'sender:'+x),...subjects.map(x=>'subject:'+x),...ids]:null;const [contacts,prefs]=await Promise.all([emails?.length?db.from('personal_hub_contacts').select('email,name').in('email',emails).limit(100):db.from('personal_hub_contacts').select('email,name').limit(rows?0:10000),keys?.length?db.from('personal_hub_preferences').select('scope,key,importance,spam,updated_at').in('key',keys.map(x=>x.split(':').slice(1).join(':'))).limit(250):db.from('personal_hub_preferences').select('scope,key,importance,spam,updated_at').limit(rows?0:20000)]);if(contacts.error)throw contacts.error;if(prefs.error)throw prefs.error;return{contacts:new Map((contacts.data||[]).map(x=>[x.email,x])),prefs:new Map((prefs.data||[]).map(x=>[x.scope+':'+x.key,x]))};}
 function classifyPersonalMessage(row,knowledge){const email=String(row.sender_email||'').toLowerCase(),subject=importanceSubject(row.subject),meta=row.raw_metadata||{},contact=knowledge.contacts.get(email),messageRule=knowledge.prefs.get('message:'+row.id),senderRule=knowledge.prefs.get('sender:'+email),subjectRule=knowledge.prefs.get('subject:'+subject);const rules=[messageRule,...[senderRule,subjectRule].filter(Boolean).sort((a,b)=>String(b.updated_at).localeCompare(String(a.updated_at)))];const imp=rules.find(x=>typeof x?.importance==='boolean'),spam=rules.find(x=>typeof x?.spam==='boolean');const text=(row.subject+' '+row.preview).toLowerCase();const promotional=/@(?:mail\.)?(?:beehiiv\.com|substack\.com)$/.test(email)||(/\b(unsubscribe|opt.out|manage (?:your )?preferences)\b/i.test(text)&&(/(?:no.?reply|newsletter|marketing|offers|digest|promotions)@/i.test(email)||/\b(sale ends|limited.time offer|sponsored|black friday|newsletter)\b/i.test(String(row.subject||''))));const providerSpam=(row.provider_labels||[]).includes('SPAM');const urgent=/\b(action required|please (?:review|approve|confirm|respond)|awaiting your|deadline|urgent|signature required|meeting request|payment due|contract|proposal|investment)\b/i.test(text);return{knownContact:!!contact,contactName:contact?.name||'',isSpam:spam?spam.spam:(contact||imp?.importance===true)?false:promotional||providerSpam,important:imp?imp.importance:promotional&&!contact?false:urgent||Boolean(row.important),reason:imp?'Your saved importance decision':contact?'Known contact':urgent?'Action or decision requested':promotional?'Promotional or newsletter signals':'Regular email'};}
 async function addPersonalContact(payload){const db=admin(),id=String(payload.messageId||'');const {data:row,error}=await db.from('communication_messages').select('*').eq('id',id).maybeSingle();if(error)throw error;if(!row)throw Error('Message not found');const identity=displayIdentity(row);const email=String(identity.email||'').toLowerCase();if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))throw Error('Sender has no valid email address');const found=await db.from('personal_hub_contacts').select('*').eq('email',email).maybeSingle();if(found.error)throw found.error;const current=found.data||{},body=String(row.raw_metadata?.body||row.preview||'').replace(/<[^>]*>/g,' '),linkedin=body.match(/https?:\/\/(?:[a-z]{2}\.)?(?:www\.)?linkedin\.com\/in\/[a-z0-9_%.-]+\/?/i)?.[0]||'',phone=body.match(/(?:phone|mobile|tel|cell)\s*:?\s*(\+?[\d ()-]{7,24})/i)?.[1]?.trim()||'',website=body.match(/https?:\/\/(?![^\s/]*linkedin\.com)[a-z0-9.-]+\.[a-z]{2,}(?:\/[^\s<>]*)?/i)?.[0]||'';const name=identity.name&&identity.name!==email?identity.name:email;const contact={...current,email,name:current.name||name,phone:current.phone||phone,website:current.website||website,linkedin_url:current.linkedin_url||linkedin,linkedin_status:current.linkedin_url?current.linkedin_status:linkedin?'email_signature':'pending',source_message_id:current.source_message_id||id,last_contact_at:row.received_at,evidence:{...(current.evidence||{}),emailSource:id,linkedinSource:linkedin?id:current.evidence?.linkedinSource||null},updated_at:new Date().toISOString()};const saved=await db.from('personal_hub_contacts').upsert(contact,{onConflict:'email'}).select('*').single();if(saved.error)throw saved.error;await savePersonalPreference({scope:'sender',key:email,spam:false});return saved.data;}
 async function savePersonalPreference(payload){const scope=payload.scope||'sender',key=scope==='subject'?importanceSubject(payload.key):(scope==='message'?String(payload.key||''):String(payload.key||'').toLowerCase());if(!['sender','subject','message'].includes(scope)||!key||(!('importance'in payload)&&!('spam'in payload)))throw Error('Valid preference required');const db=admin();const old=await db.from('personal_hub_preferences').select('*').eq('scope',scope).eq('key',key).maybeSingle();if(old.error)throw old.error;const value={...(old.data||{}),scope,key,updated_at:new Date().toISOString()};if(typeof payload.importance==='boolean')value.importance=payload.importance;if(typeof payload.spam==='boolean')value.spam=payload.spam;const saved=await db.from('personal_hub_preferences').upsert(value,{onConflict:'scope,key'});if(saved.error)throw saved.error;return value;}
@@ -669,7 +682,7 @@ async function setPersonalImportance(payload){const db=admin(),id=String(payload
 async function classifyPersonalBatch(){const db=admin(),claim=await db.rpc('claim_personal_inbox_review');if(claim.error)throw claim.error;if(!claim.data)return{busy:true,done:false};try{const stateResult=await db.from('personal_hub_classification_state').select('*').eq('id','inbox').maybeSingle();if(stateResult.error)throw stateResult.error;const state=stateResult.data||{cursor:'',scanned:0,spam_moved:0};const passStarted=state.pass_started_at||new Date().toISOString();let query=db.from('communication_messages').select('*').order('id').limit(25);if(state.cursor)query=query.gt('id',state.cursor);if(state.watch_since)query=query.gte('updated_at',state.watch_since);const {data:rows,error}=await query;if(error)throw error;const knowledge=await contactKnowledge();let moved=0,failed=0,processed=0,lastId=state.cursor;for(const row of rows||[]){if(moved+failed>=5)break;processed++;lastId=row.id;const decision=classifyPersonalMessage(row,knowledge);let meta={...(row.raw_metadata||{}),knownContact:decision.knownContact,classificationReason:decision.reason};if(decision.isSpam&&((row.provider==='gmail'&&(row.provider_labels||[]).includes('INBOX'))||row.provider==='zoho')&&meta.hubFolder!=='spam'&&!['trash','archive'].includes(meta.hubFolder)&&!row.provider_labels?.includes('TRASH')){try{const payload={id:row.id,provider:row.provider,providerId:meta.providerId,mailbox:row.mailbox_owner};if(row.provider==='gmail')await spamGmail(payload);else if(row.provider==='zoho')await mutateZoho(payload,'spam');else throw Error('Unsupported provider');meta.hubFolder='spam';moved++;}catch(e){failed++;meta.spamMoveError=String(e.message||e).slice(0,200);}}const saved=await db.from('communication_messages').update({important:decision.important,raw_metadata:meta}).eq('id',row.id);if(saved.error)throw saved.error;}const done=(rows||[]).length<25&&processed===(rows||[]).length;const saved=await db.from('personal_hub_classification_state').upsert({id:'inbox',cursor:done?'':lastId,watch_since:done?passStarted:state.watch_since||null,pass_started_at:done?null:passStarted,scanned:Number(state.scanned)+processed,spam_moved:Number(state.spam_moved)+moved,last_error:failed?failed+' provider moves failed; messages retained':null,updated_at:new Date().toISOString()});if(saved.error)throw saved.error;return{scanned:processed,totalScanned:Number(state.scanned)+processed,spamMoved:moved,failed,done};}finally{await db.from('personal_hub_classification_state').update({lease_until:null}).eq('id','inbox');}}
 
 async function applyLearnedRules(rows){
- const knowledge=await contactKnowledge(); const db=admin(),[important,spam]=await Promise.all([db.from('communication_importance_learning').select('sender_email,sender_domain,subject_pattern').eq('decision','important').limit(1000),db.from('communication_spam_learning').select('sender_email,sender_domain,subject_pattern').eq('decision','spam').limit(500)]);
+ const knowledge=await contactKnowledge(rows); const db=admin(),[important,spam]=await Promise.all([db.from('communication_importance_learning').select('sender_email,sender_domain,subject_pattern').eq('decision','important').limit(1000),db.from('communication_spam_learning').select('sender_email,sender_domain,subject_pattern').eq('decision','spam').limit(500)]);
  for(const row of rows){const email=String(row.sender_email||'').toLowerCase(),domain=email.includes('@')?email.split('@').pop():'',subject=String(row.subject||'').toLowerCase();let score=0;
  for(const rule of important.data||[]){if(rule.sender_email&&rule.sender_email===email)score+=70;if(rule.sender_domain&&domain&&rule.sender_domain===domain)score+=20;if(rule.subject_pattern&&subject&&subject.includes(String(rule.subject_pattern).slice(0,45)))score+=35}if(Math.min(100,score)>=70)row.important=true;
  if((spam.data||[]).some(rule=>rule.sender_email&&rule.sender_email===email||rule.sender_domain&&domain&&rule.sender_domain===domain||rule.subject_pattern&&subject&&subject.includes(String(rule.subject_pattern).slice(0,60))))row.raw_metadata={...(row.raw_metadata||{}),spamCandidate:true};
@@ -685,8 +698,9 @@ async function archiveGmail(payload){const db=admin();const {data:records,error}
 async function spamGmail(payload){const db=admin();const {data:records,error}=await db.from('communication_integrations').select('*').or('provider.eq.gmail,provider.like.gmail:%');if(error)throw error;const record=(records||[]).find(r=>String(r.organization_name||'').toLowerCase()===String(payload.mailbox||'').toLowerCase());if(!record)throw new Error('Gmail mailbox is not connected');const {accessToken}=await gmailAccessToken(record);const id=providerActionId(payload);const res=await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/'+encodeURIComponent(id)+'/modify',{method:'POST',headers:{Authorization:'Bearer '+accessToken,'Content-Type':'application/json'},body:JSON.stringify({addLabelIds:['SPAM'],removeLabelIds:['INBOX']})});if(!res.ok)throw new Error('Gmail spam failed: '+res.status);return{ok:true,provider:'gmail',action:'spam',id}}
 async function mutateGmail(payload,action){
  const db=admin(),mailbox=String(payload.mailbox||'').toLowerCase();const {data:records,error}=await db.from('communication_integrations').select('*').or('provider.eq.gmail,provider.like.gmail:%');if(error)throw error;
- const record=(records||[]).find(r=>String(r.organization_name||'').toLowerCase()===mailbox);if(!record)throw new Error('Gmail mailbox is not connected');const {accessToken}=await gmailAccessToken(record),id=providerActionId(payload);if(!id)throw new Error('Gmail message id required');if(!['trash','restore'].includes(action))throw new Error('Unsupported Gmail action');
+ const record=(records||[]).find(r=>String(r.organization_name||'').toLowerCase()===mailbox);if(!record)throw new Error('Gmail mailbox is not connected');const {accessToken}=await gmailAccessToken(record),id=providerActionId(payload);if(!id)throw new Error('Gmail message id required');if(!['trash','restore','delete'].includes(action))throw new Error('Unsupported Gmail action');
  const root='https://gmail.googleapis.com/gmail/v1/users/me/messages/'+encodeURIComponent(id),headers={Authorization:'Bearer '+accessToken,'Content-Type':'application/json'};
+ if(action==='delete'){const result=await fetch(root,{method:'DELETE',headers});if(!result.ok&&result.status!==404)throw Error(result.status===403?'Gmail permanent deletion requires reconnection with full mail access.':'Gmail permanent deletion failed: '+result.status);return{ok:true,provider:'gmail',action,id};}
  if(action==='trash'){const result=await fetch(root+'/trash',{method:'POST',headers});if(!result.ok)throw new Error('Gmail trash failed: '+result.status);return{ok:true,provider:'gmail',action,id};}
  const {data:row,error:rowError}=await db.from('communication_messages').select('raw_metadata,provider_labels').eq('id','gmail:'+id).eq('mailbox_owner',mailbox).maybeSingle();if(rowError)throw rowError;
  if(!row||row.raw_metadata?.hubFolder==='trash'||(row.provider_labels||[]).includes('TRASH')){const result=await fetch(root+'/untrash',{method:'POST',headers});if(!result.ok)throw new Error('Gmail restore failed: '+result.status);}
@@ -694,7 +708,7 @@ async function mutateGmail(payload,action){
 }
 async function mutateZoho(payload,action){
  const db=admin(),mailbox=String(payload.mailbox||'').toLowerCase(),messageId=providerActionId(payload);if(!/^\d+$/.test(messageId))throw new Error('Valid Zoho message id required');
- if(!['trash','restore','archive','spam'].includes(action))throw new Error('Unsupported Zoho action');
+ if(!['trash','restore','archive','spam','delete'].includes(action))throw new Error('Unsupported Zoho action');
  const {data:records,error}=await db.from('communication_integrations').select('*').or('provider.eq.zoho,provider.like.zoho:%');if(error)throw error;
  const ordered=[...(records||[])].sort((a,b)=>Number(String(b.organization_name||'').toLowerCase()===mailbox)-Number(String(a.organization_name||'').toLowerCase()===mailbox));
  let rejected='';recordsLoop:for(const record of ordered){
@@ -705,11 +719,20 @@ async function mutateZoho(payload,action){
   let meta={...(row.raw_metadata||{})},folderId=String(meta.folderId||'');
   if(!/^\d+$/.test(folderId)&&action!=='restore'){const page=await fetch('https://mail.zoho.com/api/accounts/'+accountId+'/messages/view?limit=200&sortBy=date&sortorder=false',{headers});if(page.ok){const found=extractAccountRecords(await page.json()).find(x=>field(x,'messageId','messageID')===messageId);if(found)folderId=field(found,'folderId','folderID');}}
   let endpoint='https://mail.zoho.com/api/accounts/'+accountId+'/updatemessage',method='PUT',body;
-  if(action==='trash'){
+  if(action==='delete'){
+   if(['trash','spam'].includes(meta.hubFolder)){
+    const f=await fetch('https://mail.zoho.com/api/accounts/'+accountId+'/folders',{headers}),j=await f.json();
+    if(!f.ok||Number(j.status?.code||f.status)!==200)throw Error('Zoho folder lookup failed');
+    const target=extractAccountRecords(j).find(x=>String(x.folderType||x.folderName||x.name||'').toLowerCase()===meta.hubFolder);
+    folderId=target?field(target,'folderId','folderID'):'';
+   }
+   if(!/^\d+$/.test(folderId))throw Error('Zoho current folder unavailable for permanent deletion');
+   endpoint='https://mail.zoho.com/api/accounts/'+accountId+'/folders/'+folderId+'/messages/'+messageId+'?expunge=true';method='DELETE';
+  }else if(action==='trash'){
    if(meta.hubFolder==='trash')return{ok:true,provider:'zoho',action,id:messageId,alreadyTrashed:true};if(!/^\d+$/.test(folderId))throw new Error('Message folder is unavailable; refresh before moving to Trash.');
    meta={...meta,folderId,hubRestoreFolderId:folderId};const saved=await db.from('communication_messages').update({raw_metadata:meta}).eq('id',id).eq('mailbox_owner',mailbox);if(saved.error)throw saved.error;
    endpoint='https://mail.zoho.com/api/accounts/'+accountId+'/folders/'+folderId+'/messages/'+messageId+'?expunge=false';method='DELETE';
-  }else{const mode=action==='archive'?'archiveMails':action==='spam'?'moveToSpam':meta.hubFolder==='archive'?'unArchiveMails':meta.hubFolder==='spam'?'markNotSpam':'moveMessage';const value={mode,messageId:[messageId]};if(mode==='moveMessage'){const destination=String(meta.hubRestoreFolderId||meta.folderId||'');if(!/^\d+$/.test(destination))throw new Error('Original folder is unavailable; refresh before restoring.');value.destfolderId=destination;}else if(/^\d+$/.test(folderId)){meta={...meta,folderId,hubRestoreFolderId:folderId};const saved=await db.from('communication_messages').update({raw_metadata:meta}).eq('id',id).eq('mailbox_owner',mailbox);if(saved.error)throw saved.error;}body=JSON.stringify(value).replace('"messageId":["'+messageId+'"]','"messageId":['+messageId+']');if(value.destfolderId)body=body.replace('"destfolderId":"'+value.destfolderId+'"','"destfolderId":'+value.destfolderId);}
+  }else{const mode=action==='archive'?'archiveMails':action==='spam'?'moveToSpam':meta.hubFolder==='archive'?'unArchiveMails':meta.hubFolder==='spam'?'markNotSpam':'moveMessage';const value={mode,messageId:[messageId]};if(mode==='moveMessage'){const folders=await fetch('https://mail.zoho.com/api/accounts/'+accountId+'/folders',{headers}),folderData=await folders.json();if(!folders.ok)throw Error('Zoho inbox lookup failed');const inbox=extractAccountRecords(folderData).find(x=>String(x.folderType||x.folderName||x.name||'').toLowerCase()==='inbox');const destination=inbox?field(inbox,'folderId','folderID'):'';if(!/^\d+$/.test(destination))throw new Error('Original folder is unavailable; refresh before restoring.');value.destfolderId=destination;}else if(/^\d+$/.test(folderId)){meta={...meta,folderId,hubRestoreFolderId:folderId};const saved=await db.from('communication_messages').update({raw_metadata:meta}).eq('id',id).eq('mailbox_owner',mailbox);if(saved.error)throw saved.error;}body=JSON.stringify(value).replace('"messageId":["'+messageId+'"]','"messageId":['+messageId+']');if(value.destfolderId)body=body.replace('"destfolderId":"'+value.destfolderId+'"','"destfolderId":'+value.destfolderId);}
   const result=await fetch(endpoint,{method,headers,body}),json=await result.json().catch(()=>({})),status=Number(json.status?.code||result.status);if(status===401||status===403){
  rejected='Zoho rejected '+action+' for '+mailbox+' ('+status+'). '+String(json.data?.errorCode||json.data?.message||json.status?.description||'Reconnect this mailbox with message-write access.');
  if(action==='trash'){
@@ -724,7 +747,7 @@ async function mutateZoho(payload,action){
   }
  }
  continue recordsLoop;
- }if(!result.ok||status!==200)throw new Error('Zoho '+action+' failed: '+status);return{ok:true,provider:'zoho',action,id:messageId};
+ }if(action==='delete'&&result.status===404)return{ok:true,provider:'zoho',action,id:messageId,alreadyDeleted:true};if(!result.ok||status!==200)throw new Error('Zoho '+action+' failed: '+status);return{ok:true,provider:'zoho',action,id:messageId};
  }
  throw new Error(rejected||'Zoho mailbox is not connected or lacks message access');
 }
@@ -749,13 +772,13 @@ async function sendGmail(payload) {
   const result=await sent.json(); if(!sent.ok)throw new Error('Gmail send failed: '+(result.error?.message||sent.status)); return {provider:'gmail',providerMessageId:result.id,threadId:result.threadId};
 }
 async function sendZoho(payload) {
- if(validatedOutgoingAttachments(payload).length)throw Error('Zoho attachment sending is not yet enabled. Files were not sent. Your draft is preserved.');
+ const outgoingAttachments=validatedOutgoingAttachments(payload);
  const db=admin(),{data:records,error}=await db.from('communication_integrations').select('*').or('provider.eq.zoho,provider.like.zoho:%');if(error)throw error;
  const candidates=[...(records||[])].sort((a,b)=>Number(String(b.organization_name||'').toLowerCase()===String(payload.from).toLowerCase())-Number(String(a.organization_name||'').toLowerCase()===String(payload.from).toLowerCase()));let rejected='';
  for(const record of candidates){const refreshed=await pchZohoTokenFetch20261005('https://accounts.zoho.com/oauth/v2/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'refresh_token',client_id:env('ZOHO_CLIENT_ID'),client_secret:env('ZOHO_CLIENT_SECRET'),refresh_token:decryptToken(record)})});const token=await refreshed.json();if(!refreshed.ok||!token.access_token)continue;
  const headers={Authorization:'Zoho-oauthtoken '+token.access_token},listed=await fetch('https://mail.zoho.com/api/accounts',{headers});if(!listed.ok)continue;
  for(const account of extractAccountRecords(await listed.json())){const email=field(account,'primaryEmailAddress','mailboxAddress','mailId');if(email.toLowerCase()!==String(payload.from).toLowerCase())continue;
- const accountId=field(account,'accountId','accountID'),sent=await fetch('https://mail.zoho.com/api/accounts/'+accountId+'/messages',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({fromAddress:payload.from,toAddress:payload.to.join(','),subject:payload.subject,content:payload.body,mailFormat:'plaintext'})}),result=await sent.json();const status=Number(result.status?.code||sent.status);
+ const accountId=field(account,'accountId','accountID');const uploaded=[];for(const item of outgoingAttachments){const binary=Uint8Array.from(atob(item.data),c=>c.charCodeAt(0));const form=new FormData();form.append('attach',new Blob([binary],{type:item.type}),item.name);const response=await fetch('https://mail.zoho.com/api/accounts/'+accountId+'/messages/attachments?uploadType=multipart&isInline=false',{method:'POST',headers:{Authorization:'Zoho-oauthtoken '+token.access_token},body:form});const result=await response.json();if(!response.ok||Number(result.status?.code||response.status)!==200)throw Error('Zoho attachment upload failed: '+(result.status?.description||response.status));const records=Array.isArray(result.data)?result.data:[result.data];for(const file of records){if(!file?.storeName||!file?.attachmentName||!file?.attachmentPath)throw Error('Zoho did not return attachment storage metadata');uploaded.push({storeName:file.storeName,attachmentName:file.attachmentName,attachmentPath:file.attachmentPath})}}const sent=await fetch('https://mail.zoho.com/api/accounts/'+accountId+'/messages',{method:'POST',headers:{...headers,'Content-Type':'application/json'},body:JSON.stringify({fromAddress:payload.from,toAddress:payload.to.join(','),subject:payload.subject,content:payload.body,mailFormat:'plaintext',...(uploaded.length?{attachments:uploaded}:{})})}),result=await sent.json();const status=Number(result.status?.code||sent.status);
  if(!sent.ok||status>=400){const code=String(result.data?.errorCode||result.data?.error?.code||result.status?.description||sent.status).slice(0,180);if(sent.status===401||sent.status===403||status===401||status===403){rejected='Zoho rejected send authorization ('+code+'). Reconnect this mailbox with message-send permission.';continue}throw new Error('Zoho send failed: '+code)}
  return{provider:'zoho',providerMessageId:field(result.data||result,'messageId','messageID','id')||null};
  }}
@@ -779,20 +802,22 @@ async function spamSenderAcrossMailboxes(payload){
 
 async function executeMessageAction(payload){
  const provider=String(payload.provider||'').toLowerCase(),action=String(payload.action||'').toLowerCase();
- if(!['trash','restore','spam','archive','important'].includes(action))return response(400,{error:'Unsupported action'});
+ if(!['trash','restore','spam','archive','important','delete'].includes(action))return response(400,{error:'Unsupported action'});
  const db=admin(),id=String(payload.id||'');
- const stored=await db.from('communication_messages').select('id,provider,mailbox_owner,raw_metadata,provider_labels').eq('id',id).maybeSingle();if(stored.error)throw stored.error;
- const record=stored.data;if(!record)return response(404,{error:'Email is no longer in the hub. Refresh the mailbox.'});
+ const stored=await db.from('communication_messages').select('id,provider,mailbox_owner,sender_email,raw_metadata,provider_labels').eq('id',id).maybeSingle();if(stored.error)throw stored.error;
+ const record=stored.data;if(!record)return action==='delete'?response(200,{ok:true,indexed:true,alreadyDeleted:true}):response(404,{error:'Email is no longer in the hub. Refresh the mailbox.'});
  if(record.provider!==provider||String(record.mailbox_owner).toLowerCase()!==String(payload.mailbox||'').toLowerCase())return response(400,{error:'Email mailbox does not match its stored record.'});
  payload={...payload,provider:record.provider,mailbox:record.mailbox_owner,providerId:record.raw_metadata?.providerId||id.split(':').pop()};
  if(action==='important'){const saved=await db.from('communication_messages').update({important:true,raw_metadata:{...(record.raw_metadata||{}),importanceSource:'manual'},updated_at:new Date().toISOString()}).eq('id',id).eq('mailbox_owner',record.mailbox_owner).select('id').single();if(saved.error)throw saved.error;if(!saved.data)throw Error('Importance change was not saved');await learnImportance(payload);return response(200,{ok:true,action:'important',hubMessageId:id,indexed:true});}
  const result=provider==='gmail'?(action==='spam'?await spamGmail(payload):action==='archive'?await archiveGmail(payload):await mutateGmail(payload,action)):provider==='zoho'?await mutateZoho(payload,action):null;
  if(!result?.ok)return response(400,{error:'Mail provider did not confirm the action.'});
+ if(action==='delete'){const removed=await db.from('communication_messages').delete().eq('id',id).eq('mailbox_owner',record.mailbox_owner);if(removed.error)throw removed.error;return response(200,{...result,indexed:true,hubMessageId:id,folder:'deleted'});}
  const latest=await db.from('communication_messages').select('raw_metadata,provider_labels').eq('id',id).maybeSingle();if(latest.error)throw latest.error;if(!latest.data)throw Error('Mail provider changed the email, but its hub record disappeared. Refresh the mailbox.');
  const folder=action==='trash'?'trash':action==='archive'?'archive':action==='spam'?'spam':'inbox',row=latest.data;
  const update={...(provider==='gmail'?{provider_labels:[...(row.provider_labels||[]).filter(x=>!['TRASH','SPAM','INBOX'].includes(x)),...(action==='trash'?['TRASH']:action==='spam'?['SPAM']:action==='archive'?[]:['INBOX'])]}:{}),raw_metadata:{...(row.raw_metadata||{}),hubFolder:folder,hubActionAt:new Date().toISOString()},updated_at:new Date().toISOString()};
  let saved;for(let attempt=0;attempt<2;attempt++){saved=await db.from('communication_messages').update(update).eq('id',id).eq('mailbox_owner',record.mailbox_owner).select('id').maybeSingle();if(!saved.error)break;}
  if(saved.error||!saved.data)throw Error('The provider changed the email, but the hub could not save the folder change. Click again to complete synchronization.');
+ if(action==='restore'&&record.raw_metadata?.hubFolder==='spam'&&record.sender_email)await savePersonalPreference({scope:'sender',key:record.sender_email,spam:false});
  if(action==='spam'&&!payload.senderBulk){await learnSpam(payload);if(payload.sender)await savePersonalPreference({scope:'sender',key:payload.sender,spam:true});}
  return response(200,{...result,hubMessageId:id,folder,indexed:true});
 }
@@ -814,10 +839,15 @@ async function handleGdhBridge(request,path,url) {
  const expected=Deno.env.get('GDH_BRIDGE_KEY_SHA256');
  const expires=Date.parse(Deno.env.get('GDH_BRIDGE_EXPIRES_AT')||'');
  if(!expected||!Number.isFinite(expires)||Date.now()>=expires)return response(503,{error:'GDH bridge is not enabled.'});
- const token=request.headers.get('authorization')?.replace(/^Bearer\s+/i,'')||'';
+ const token=request.headers.get('x-gdh-bridge-key')||request.headers.get('authorization')?.replace(/^Bearer\s+/i,'')||'';
  const actual=createHash('sha256').update(token).digest('hex');
  if(!/^[a-f0-9]{64}$/.test(expected)||!token||!timingSafeEqual(Buffer.from(actual),Buffer.from(expected)))return response(401,{error:'Bridge authentication required.'});
  if(path==='/bridge/message/action'&&request.method==='POST'){const payload=await request.json();const mailbox=String(payload.mailbox||'').toLowerCase(),provider=String(payload.provider||'').toLowerCase();if(!bridgeMailboxes.includes(mailbox)||(mailbox==='ceo@aimicrotec.com'&&provider!=='gmail')||(mailbox==='is@gdh.ltd'&&provider!=='zoho'))return response(403,{error:'Message action mailbox is outside the authorized bridge scope.'});const stored=await admin().from('communication_messages').select('mailbox_owner,provider').eq('id',String(payload.id||'')).maybeSingle();if(stored.error)throw stored.error;if(stored.data&&(String(stored.data.mailbox_owner||'').toLowerCase()!==mailbox||stored.data.provider!==provider))return response(403,{error:'Message record is outside bridge scope.'});return await executeMessageAction({...payload,mailbox,provider});}
+ if(path==='/bridge/deletion-capability'&&request.method==='GET'){
+  const listed=await admin().from('communication_integrations').select('*').or('provider.eq.gmail,provider.like.gmail:%');if(listed.error)throw listed.error;
+  const record=(listed.data||[]).find(x=>String(x.organization_name||'').toLowerCase()==='ceo@aimicrotec.com');if(!record)return response(200,{gmailPermanentDelete:false,reason:'Gmail mailbox is not connected'});
+  const token=await gmailAccessToken(record);return response(200,{gmailPermanentDelete:String(token.scopes).split(/\s+/).includes('https://mail.google.com/')});
+ }
  if(path==='/bridge/attention'&&request.method==='GET')return response(200,await listExecutiveAttention(url.searchParams.get('all')==='true'));
  if(path==='/bridge/attention'&&request.method==='POST')return await publishExecutiveAttention(await request.json());
  if(path==='/bridge/message/download'&&request.method==='GET'){const id=url.searchParams.get('id')||'';const found=await admin().from('communication_messages').select('id').eq('id',id).in('mailbox_owner',bridgeMailboxes).maybeSingle();if(found.error)throw found.error;if(!found.data)return response(404,{error:'Message not found'});return response(200,await pchDownloadOriginal20261005(id));}
@@ -865,6 +895,20 @@ async function deleteFolderBatch(payload){
  return{deleted,failed,remaining:ids?[...remaining]:undefined,done:failed.length>0||(!more&&(!ids||remaining.size===0))||deleted.length===0};
 }
 
+
+async function deleteIndexedFolderBatch20261015(payload){
+ const folder=String(payload.folder||''),before=String(payload.before||'');
+ if(!['trash','spam'].includes(folder)||!Number.isFinite(Date.parse(before)))return response(400,{error:'Trash or Spam and a snapshot timestamp are required'});
+ const db=admin();const query=await db.from('pch_compact_messages').select('id,provider,mailbox_owner').lte('received_at',before).or(folder==='trash'?'provider_labels.cs.{TRASH},hub_folder.eq.trash':'provider_labels.cs.{SPAM},hub_folder.eq.spam').order('received_at').order('id').limit(10);
+ if(query.error)throw query.error;const deleted=[],failed=[];
+ for(const row of query.data||[]){
+  const result=await executeMessageAction({id:row.id,provider:row.provider,mailbox:row.mailbox_owner,action:'delete'}),body=await result.json();
+  if(!result.ok||body.ok!==true||body.indexed!==true){failed.push({mailbox:row.mailbox_owner,error:body.error||'Deletion was not acknowledged'});break}
+  deleted.push(row.id);
+ }
+ return response(200,{ok:true,deleted,failed,done:!failed.length&&(query.data||[]).length<10});
+}
+
 Deno.serve(async (request)=>{
   const url = new URL(request.url);
   const path = url.pathname.replace(/^.*\/(?:functions\/v1\/)?hub(?=\/|$)/, '') || '/';
@@ -877,6 +921,7 @@ Deno.serve(async (request)=>{
     if(path==='/auth/request-code'&&request.method==='POST')return await requestPchCode20261004(request);
     const unauthorized = await requireIlya(request);
     if (unauthorized) return unauthorized;
+    if(path==='/folders/delete-indexed-batch'&&request.method==='POST')return await deleteIndexedFolderBatch20261015(await request.json());
     if(path==='/folders/delete-batch'&&request.method==='POST')return response(200,await deleteFolderBatch(await request.json()));
     if (path === '/health') return response(200, {
       message: 'Success',
@@ -928,6 +973,36 @@ Deno.serve(async (request)=>{
       const result=await admin().from('pch_spam_sender_jobs').select('id,status,result').eq('id',id).maybeSingle();
       if(result.error)throw result.error;
       return result.data?response(200,result.data):response(404,{error:'Job not found'});
+    }
+    if(path==='/archive/folders'&&request.method==='GET'){
+      const {data,error}=await admin().from('pch_archive_folders').select('id,name,created_at').order('name');
+      if(error)throw error;return response(200,{folders:data||[]});
+    }
+    if(path==='/archive/folders'&&request.method==='POST'){
+      const p=await request.json(),name=String(p.name||'').trim();
+      if(!name||name.length>100)return response(400,{error:'Folder name must be 1–100 characters'});
+      const {data,error}=await admin().from('pch_archive_folders').insert({name}).select('id,name').single();
+      if(error)return response(400,{error:error.code==='23505'?'Folder already exists':error.message});
+      return response(200,{folder:data});
+    }
+    if(path==='/archive/folders/move'&&request.method==='POST'){
+      const p=await request.json(),folderId=String(p.folderId||''),ids=[...new Set(Array.isArray(p.ids)?p.ids:[])].slice(0,100);
+      if(!ids.length)return response(400,{error:'No messages selected'});
+      const folder=await admin().from('pch_archive_folders').select('id').eq('id',folderId).maybeSingle();
+      if(folder.error)throw folder.error;if(!folder.data)return response(404,{error:'Archive subfolder not found'});
+      const {data:rows,error}=await admin().from('communication_messages').select('id,provider,mailbox_owner,raw_metadata,provider_labels').in('id',ids);
+      if(error)throw error;
+      const moved=[],failed=[];
+      for(const row of rows||[]){try{
+        const alreadyArchived=row.raw_metadata?.hubFolder==='archive'||(row.provider==='gmail'&&!(row.provider_labels||[]).includes('INBOX')&&!(row.provider_labels||[]).includes('SPAM')&&!(row.provider_labels||[]).includes('TRASH'));
+        if(!alreadyArchived){
+          const res=await executeMessageAction({id:row.id,provider:row.provider,mailbox:row.mailbox_owner,action:'archive'});
+          if(res.status!==200)throw Error('Provider archive action failed');
+        }
+        const assigned=await admin().from('pch_archive_folder_messages').upsert({message_id:row.id,folder_id:folderId},{onConflict:'message_id'});
+        if(assigned.error)throw assigned.error;moved.push(row.id);
+      }catch(e){failed.push({id:row.id,error:String(e.message||e)})}}
+      return response(200,{moved,failed});
     }
     if(path==='/message/action'&&request.method==='POST')return await executeMessageAction(await request.json());
     if(path==='/message/translate'&&request.method==='POST')return response(200,await pchTranslatePreview20261005(await request.json()));
