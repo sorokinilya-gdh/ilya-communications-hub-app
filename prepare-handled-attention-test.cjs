@@ -1,0 +1,10 @@
+const fs=require('fs');let s=fs.readFileSync('test-folder-parity-20261015.mjs','utf8');
+s=s.replace('opsRead:HubOpsRead20261015','opsRead:HubOpsRead20261015,needsAttention:HubNeedsAttention20261015');
+s=s.replace("await page.getByText('trash fixture 0',{exact:true}).waitFor();",`await page.getByText('trash fixture 0',{exact:true}).waitFor();
+ await page.locator('[data-email-id="gmail:trash0"] input').check();await page.getByRole('button',{name:'Archive selected',exact:true}).click();await page.waitForFunction(()=>document.querySelectorAll('[data-email-id]').length===0);
+ assert.equal(await page.evaluate(()=>window.__parityTools.needsAttention({id:'gmail:trash0',priority:true,folder:'inbox'})),false);
+ await page.reload();await page.locator('[data-pch-ready="true"]').waitFor();assert.equal(await page.evaluate(()=>window.__parityTools.needsAttention({id:'gmail:trash0',priority:true,folder:'inbox'})),false);
+ assert.equal(await page.evaluate(()=>window.__parityTools.needsAttention({id:'untouched',priority:true,folder:'inbox'})),true);
+ for(const folder of ['archive','trash','spam','deleted'])assert.equal(await page.evaluate(folder=>window.__parityTools.needsAttention({id:'untouched',priority:true,folder}),folder),false);
+`);
+fs.writeFileSync('test-handled-attention-20261015.mjs',s);

@@ -1,0 +1,11 @@
+const fs=require('fs'),vm=require('vm'),{execFileSync}=require('child_process');process.chdir('C:/Users/Ilya/Documents/GitHub/pch-parity-main');
+if(!(fs.readFileSync('handled-attention-test.log','utf8').includes('PASS PCH browser')||fs.readFileSync('handled-attention-test.log','utf16le').includes('PASS PCH browser')))throw Error('Browser acceptance required');
+const root='C:/Users/Ilya/Documents/GitHub/gdh-ai-operating-system/apps/web/.gdh-runtime/local-hub/site';
+let patch=fs.readFileSync('patch-handled-attention-20261015.cjs','utf8');
+patch=patch.replace("process.chdir('C:/Users/Ilya/Documents/GitHub/pch-parity-main')","process.chdir("+JSON.stringify(root)+")");
+const a=patch.indexOf("let helper=fs.readFileSync("),b=patch.indexOf("let index=fs.readFileSync(");if(a<0||b<a)throw Error('Missing helper boundaries');patch=patch.slice(0,a)+patch.slice(b);
+patch=patch.replace('index-FolderParity20261015.js?v=4','index-FolderParity20261015.js?v=local1').replace('index-FolderParity20261015.js?v=5','index-FolderParity20261015.js?v=local2');
+vm.runInNewContext(patch,{require,console,process});
+process.chdir('C:/Users/Ilya/Documents/GitHub/pch-parity-main');
+const paths=['assets/index-FolderParity20261015.js','folder-operations-20261015.js','index.html','patch-handled-attention-20261015.cjs','prepare-handled-attention-test.cjs','test-handled-attention-20261015.mjs','release-handled-attention-20261015.cjs'];
+execFileSync('git',['add','--',...paths],{stdio:'inherit'});execFileSync('git',['commit','--only','-m','Remove handled mail from attention and expose bulk archive controls','--',...paths],{stdio:'inherit'});execFileSync('git',['push','origin','HEAD:main'],{stdio:'inherit'});console.log('Local Personal Hub updated and GitHub preserved.');
